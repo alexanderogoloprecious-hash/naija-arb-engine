@@ -105,8 +105,9 @@ while True:
     try:
       print("📡 Fetching scan data via Gemini...", flush=True)
 
+      # Fixed model name
       response = client.models.generate_content(
-          model="gemini-2.5-flash",
+          model="gemini-1.5-flash",
           contents="Scan for active arbitrage opportunities.",
       )
 
