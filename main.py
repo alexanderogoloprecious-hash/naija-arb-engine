@@ -1,6 +1,5 @@
 import http.server
 import os
-import socketserver
 import threading
 import time
 import requests
@@ -8,18 +7,18 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 1. RENDER KEEPALIVE / HEALTH CHECK SERVER
+# 1. IMMEDIATE WEB PORT BINDING (RENDER REQUIRED)
 # ==========================================
 PORT = int(os.environ.get("PORT", 10000))
 
 
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
 
   def do_GET(self):
     self.send_response(200)
     self.send_header("Content-type", "text/plain")
     self.end_headers()
-    self.wfile.write(b"Naija Sports Surebet Engine active!")
+    self.wfile.write(b"OK - Naija Sports Arb Engine Active")
 
   def do_HEAD(self):
     self.send_response(200)
@@ -27,19 +26,23 @@ class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
     self.end_headers()
 
   def log_message(self, format, *args):
-    return
+    return  # Suppress HTTP server stdout logs
 
 
-def start_health_server():
+def run_web_server():
   try:
-    with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
-      print(f"✅ Health Check Server listening on port {PORT}", flush=True)
-      httpd.serve_forever()
+    server_address = ("0.0.0.0", PORT)
+    httpd = http.server.ThreadingHTTPServer(server_address, HealthCheckHandler)
+    print(f"✅ Web Port Server bound to 0.0.0.0:{PORT}", flush=True)
+    httpd.serve_forever()
   except Exception as e:
-    print(f"❌ Health Check Server Error: {e}", flush=True)
+    print(f"❌ Web Port Server Error: {e}", flush=True)
 
 
-threading.Thread(target=start_health_server, daemon=True).start()
+# Fire up web port server immediately in a background daemon thread
+server_thread = threading.Thread(target=run_web_server, daemon=True)
+server_thread.start()
+time.sleep(1)
 
 # ==========================================
 # 2. BULLETPROOF TELEGRAM NOTIFIER
@@ -55,7 +58,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 def send_telegram_alert(message: str):
   if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    print("⚠️ Telegram credentials missing in Render environment.", flush=True)
+    print("⚠️ Missing Telegram environment variables.", flush=True)
     return
 
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -69,13 +72,14 @@ def send_telegram_alert(message: str):
   try:
     res = requests.post(url, json=payload, timeout=12)
 
+    # Markdown fallback mechanism
     if res.status_code == 400 and "parse" in res.text.lower():
-      print("⚠️ Retrying Telegram message without Markdown...", flush=True)
+      print("⚠️ Retrying Telegram message in plain text...", flush=True)
       payload.pop("parse_mode", None)
       res = requests.post(url, json=payload, timeout=12)
 
     if res.status_code == 200:
-      print("✅ Telegram sports alert delivered successfully!", flush=True)
+      print("✅ Telegram alert delivered successfully!", flush=True)
     else:
       print(
           f"❌ Telegram API Error ({res.status_code}): {res.text}", flush=True
@@ -99,11 +103,11 @@ client = None
 if GEMINI_API_KEY:
   try:
     client = genai.Client(api_key=GEMINI_API_KEY)
-    print("✅ Gemini API Client initialized successfully.", flush=True)
+    print("✅ Gemini API Client initialized.", flush=True)
   except Exception as e:
-    print(f"❌ Gemini Client Initialization Error: {e}", flush=True)
+    print(f"❌ Gemini Initialization Error: {e}", flush=True)
 else:
-  print("⚠️ GEMINI_API_KEY missing in Render environment variables!", flush=True)
+  print("⚠️ GEMINI_API_KEY missing in environment variables!", flush=True)
 
 # ==========================================
 # 4. EXCLUSIVE NIGERIAN SPORTS PROMPT & CONFIG
@@ -153,7 +157,6 @@ FORMAT THE TELEGRAM OUTPUT EXACTLY AS FOLLOWS:
 If no 100% guaranteed surebet exists in this cycle, provide a summary of top high-odds sports matches currently monitored across SportyBet, Bet9ja, and BetKing.
 """
 
-# Correct google.genai SDK Grounding Configuration
 search_config = types.GenerateContentConfig(
     tools=[types.Tool(google_search=types.GoogleSearch())]
 )
