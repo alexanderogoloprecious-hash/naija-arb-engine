@@ -9,7 +9,7 @@ from google import genai
 # ==========================================
 # 1. RENDER HEALTH CHECK SERVER
 # ==========================================
-PORT = int(os.environ.get("PORT", 8080))
+PORT = int(os.environ.get("PORT", 10000))
 
 
 class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
@@ -26,13 +26,13 @@ class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
     self.end_headers()
 
   def log_message(self, format, *args):
-    return  # Keep logs clean
+    return  # Keep console logs clean
 
 
 def start_health_server():
   try:
     with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
-      print(f"✅ Health check server running on port {PORT}", flush=True)
+      print(f"✅ Health check server listening on port {PORT}", flush=True)
       httpd.serve_forever()
   except Exception as e:
     print(f"❌ Health Server Error: {e}", flush=True)
@@ -43,21 +43,28 @@ threading.Thread(target=start_health_server, daemon=True).start()
 # ==========================================
 # 2. BULLETPROOF TELEGRAM NOTIFIER
 # ==========================================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+raw_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+# Automatically clean token if 'bot' prefix was accidentally included in Render
+if raw_token.lower().startswith("bot"):
+  TELEGRAM_BOT_TOKEN = raw_token[3:]
+else:
+  TELEGRAM_BOT_TOKEN = raw_token
+
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 
 def send_telegram_alert(message: str):
   if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print(
-        "⚠️ Telegram environment variables missing. Skipping alert.",
+        "⚠️ Telegram environment variables missing or incomplete. Skipping"
+        " alert.",
         flush=True,
     )
     return
 
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-  # Attempt 1: Send formatted message
+  # Primary delivery attempt with Markdown formatting
   payload = {
       "chat_id": TELEGRAM_CHAT_ID,
       "text": message,
@@ -67,14 +74,17 @@ def send_telegram_alert(message: str):
   try:
     res = requests.post(url, json=payload, timeout=10)
 
-    # Attempt 2: If Telegram rejects special Markdown characters, fallback to plain text
+    # Fallback delivery attempt with plain text if Markdown fails
     if res.status_code == 400 and "parse" in res.text.lower():
-      print("⚠️ Markdown formatting error. Retrying in plain text...", flush=True)
+      print(
+          "⚠️ Telegram Markdown format rejected. Retrying as plain text...",
+          flush=True,
+      )
       payload.pop("parse_mode", None)
       res = requests.post(url, json=payload, timeout=10)
 
     if res.status_code == 200:
-      print("✅ Telegram notification delivered!", flush=True)
+      print("✅ Telegram alert successfully delivered!", flush=True)
     else:
       print(
           f"❌ Telegram API Error ({res.status_code}): {res.text}", flush=True
@@ -84,8 +94,8 @@ def send_telegram_alert(message: str):
     print(f"❌ Telegram Network Error: {e}", flush=True)
 
 
-# Send initial startup ping
-send_telegram_alert("🚀 *Naija Arb Engine is ONLINE & Scanning!*")
+# Send startup alert to verify connection
+send_telegram_alert("🚀 *Naija Arb Engine Online* — System operational.")
 
 # ==========================================
 # 3. GEMINI API CLIENT INITIALIZATION
@@ -96,52 +106,49 @@ client = None
 if GEMINI_API_KEY:
   try:
     client = genai.Client(api_key=GEMINI_API_KEY)
-    print("✅ Gemini API Client initialized.", flush=True)
+    print("✅ Gemini API Client initialized successfully.", flush=True)
   except Exception as e:
-    print(f"❌ Gemini Initialization Error: {e}", flush=True)
+    print(f"❌ Gemini Client Error: {e}", flush=True)
 else:
-  print("⚠️ GEMINI_API_KEY missing in environment variables!", flush=True)
+  print("⚠️ GEMINI_API_KEY is missing in Render Environment!", flush=True)
 
 # ==========================================
-# 4. ARBITRAGE SCANNER LOOP WITH FALLBACKS
+# 4. ARBITRAGE CONTINUOUS SCAN LOOP
 # ==========================================
-PREFERRED_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash"]
+MODEL_NAME = "gemini-3.6-flash"
 
-print("⚡ Continuous scanning engine active...", flush=True)
+print(
+    f"⚡ Starting main scanner loop with model {MODEL_NAME}...", flush=True
+)
 
 while True:
-  print("\n🔍 Starting scan cycle...", flush=True)
+  print("\n🔍 Running arbitrage scan cycle...", flush=True)
 
   if client:
-    success = False
+    try:
+      print(f"📡 Querying {MODEL_NAME}...", flush=True)
 
-    for model_name in PREFERRED_MODELS:
-      try:
-        print(f"📡 Querying model: {model_name}...", flush=True)
+      response = client.models.generate_content(
+          model=MODEL_NAME,
+          contents=(
+              "Identify potential arbitrage opportunities in current markets"
+              " and format as a concise alert."
+          ),
+      )
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents="Scan for active arbitrage opportunities.",
-        )
+      if response and hasattr(response, "text") and response.text:
+        print("💡 Scan successful! Sending alert to Telegram...", flush=True)
+        scan_output = response.text
 
-        if response and hasattr(response, "text") and response.text:
-          print(f"💡 Scan successful using {model_name}!", flush=True)
-          scan_text = response.text
+        alert_msg = f"⚡ *Arbitrage Scan Alert*\n\n{scan_output[:1000]}"
+        send_telegram_alert(alert_msg)
+      else:
+        print("⚠️ Received empty response from model.", flush=True)
 
-          # Deliver results to Telegram
-          alert_msg = f"⚡ *Arbitrage Scan ({model_name})*\n\n{scan_text[:1000]}"
-          send_telegram_alert(alert_msg)
-
-          success = True
-          break
-
-      except Exception as e:
-        print(f"⚠️ Model {model_name} failed: {e}", flush=True)
-
-    if not success:
-      print("❌ All model attempts failed during this cycle.", flush=True)
+    except Exception as e:
+      print(f"❌ Gemini Execution Error: {e}", flush=True)
   else:
-    print("⚠️ Skipping scan: Gemini client not initialized.", flush=True)
+    print("⚠️ Skipping cycle: Gemini client not initialized.", flush=True)
 
-  print("⏳ Sleeping for 60 seconds...", flush=True)
+  print("⏳ Scan complete. Sleeping for 60 seconds...", flush=True)
   time.sleep(60)
