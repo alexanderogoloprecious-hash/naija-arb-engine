@@ -7,7 +7,7 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 1. RENDER PORT BINDING (0.0.0.0 HEALTH CHECK)
+# 1. RENDER PORT BINDING (HEALTH CHECK)
 # ==========================================
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -88,7 +88,6 @@ def send_telegram_alert(message: str):
 class GeminiKeyManager:
 
   def __init__(self):
-    # Retrieve all 3 API keys from environment
     raw_keys = [
         os.environ.get("GEMINI_API_KEY", "").strip(),
         os.environ.get("GEMINI_API_KEY_2", "").strip(),
@@ -125,7 +124,6 @@ class GeminiKeyManager:
         except Exception as e:
           print(f"❌ Failed to build client for Key #{idx + 1}: {e}", flush=True)
 
-    # All keys on cooldown: calculate time to wait for earliest key reset
     earliest_reset = min(self.cooldowns.values())
     wait_time = max(10, int(earliest_reset - now))
     print(
@@ -152,7 +150,7 @@ key_manager = GeminiKeyManager()
 # ==========================================
 # 4. HIGH-ACCURACY NIGERIAN SUREBET PROMPT
 # ==========================================
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.6-flash"
 
 NIGERIAN_SPORTS_SUREBET_PROMPT = """
 You are an expert quantitative sports arbitrage analyst specializing exclusively in NIGERIAN BOOKMAKERS.
@@ -205,10 +203,9 @@ search_config = types.GenerateContentConfig(
     tools=[types.Tool(google_search=types.GoogleSearch())]
 )
 
-# Send Startup Signal
 send_telegram_alert(
-    "🇳🇬 *Multi-Key Naija Sports Engine ONLINE*\n\nEngine active with 3-key"
-    " automated failover & ₦10,000 stake calculator."
+    "🇳🇬 *Multi-Key Naija Sports Engine ONLINE*\n\nEngine active using"
+    " gemini-3.6-flash with 3-key automated failover & ₦10,000 stake calculator."
 )
 
 # ==========================================
@@ -217,10 +214,7 @@ send_telegram_alert(
 SCAN_INTERVAL_SECONDS = 300  # 5-minute scans
 
 while True:
-  print(
-      "\n🇳🇬 Starting Nigerian sports surebet scan cycle...",
-      flush=True,
-  )
+  print("\n🇳🇬 Starting Nigerian sports surebet scan cycle...", flush=True)
 
   client, key_num = key_manager.get_active_client()
 
@@ -256,7 +250,7 @@ while True:
 
       if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
         key_manager.mark_key_exhausted(key_num, cooldown_seconds=600)
-        continue  # Immediately retry scan with next available key
+        continue
   else:
     print("⚠️ Engine waiting for active API key...", flush=True)
 
