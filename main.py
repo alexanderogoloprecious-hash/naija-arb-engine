@@ -95,18 +95,12 @@ def run_scanner_loop():
         {"bookmaker": "SportyBet", "match": "3SC vs Enyimba Aba", "market": "Over/Under 2.5", "outcomes": [{"name": "Over 2.5", "odds": 2.25}]},
         {"bookmaker": "Bet9ja", "match": "Shooting Stars vs Enyimba Int", "market": "Over/Under 2.5", "outcomes": [{"name": "Under 2.5", "odds": 1.98}]}
     ]
-print("1. Starting scan cycle...", flush=True)
-
+  print("1. Requesting data from Gemini...", flush=True)
 try:
-  print("2. Requesting data from Gemini...", flush=True)
-  # Your existing Gemini API call line here:
-  # response = model.generate_content(...
-    response = client.models.generate_content(
-       print("3. Gemini response received!", flush=True)
+  response = client.models.generate_content(
+  print("2. Gemini response received!", flush=True)
 except Exception as e:
   print(f"❌ Gemini API Error: {e}", flush=True)
-
-print("4. Scan cycle complete. Waiting for next run...\n", flush=True)
         model="gemini-2.5-flash",
         contents=str(sample_odds),
         config=types.GenerateContentConfig(
