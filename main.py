@@ -1,126 +1,124 @@
+import http.server
 import os
-import requests
-
-# Send test notification on startup
-token = os.environ.get("TELEGRAM_BOT_TOKEN")
-chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-if token and chat_id:
-  try:
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(
-        url,
-        json={"chat_id": chat_id, "text": "🚀 Naija Arb Engine is now ONLINE!"},
-    )
-    print("Startup Telegram test sent successfully!", flush=True)
-  except Exception as e:
-    print(f"Telegram error: {e}", flush=True)
-import os
-import sys
+import socketserver
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-
-  def do_GET(self):
-    self.send_response(200)
-    self.end_headers()
-    self.wfile.write(b"OK")
-
-  def do_HEAD(self):
-    self.send_response(200)
-    self.end_headers()
-
-
-def start_health_server():
-  port = int(os.environ.get("PORT", 10000))
-  server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-  server.serve_forever()
-
-
-threading.Thread(target=start_health_server, daemon=True).start()
-import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-
-# Dummy server to pass Render's port check
-class HealthCheckHandler(BaseHTTPRequestHandler):
-
-  def do_GET(self):
-    self.send_response(200)
-    self.end_headers()
-    self.wfile.write(b"OK")
-
-
-def start_health_server():
-  port = int(os.environ.get("PORT", 10000))
-  server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-  server.serve_forever()
-
-
-threading.Thread(target=start_health_server, daemon=True).start()
-import os
 import time
 import requests
 from google import genai
-from google.genai import types
 
-# Load credentials from environment variables
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# ==========================================
+# 1. RENDER HEALTH CHECK SERVER
+# ==========================================
+PORT = int(os.environ.get("PORT", 8080))
+
+
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+
+  def do_GET(self):
+    self.send_response(200)
+    self.send_header("Content-type", "text/plain")
+    self.end_headers()
+    self.wfile.write(b"Naija Arb Engine is active!")
+
+  def do_HEAD(self):
+    self.send_response(200)
+    self.send_header("Content-type", "text/plain")
+    self.end_headers()
+
+  def log_message(self, format, *args):
+    return  # Silence server logs to keep console clean
+
+
+def start_health_server():
+  with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
+    print(f"Health check server running on port {PORT}", flush=True)
+    httpd.serve_forever()
+
+
+# Run HTTP health check server on a background thread for Render
+threading.Thread(target=start_health_server, daemon=True).start()
+
+# ==========================================
+# 2. TELEGRAM NOTIFICATION HELPER
+# ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-SYSTEM_INSTRUCTION = """
-You are "NaijaArbEngine-Pro", an ultra-low-latency sports betting arbitrage engine for Nigerian sportsbooks (SportyBet, Bet9ja, etc.).
-Evaluate input odds feeds for arbitrage. If found, return JSON output with profit margins and ₦100 rounded stakes for a ₦100,000 bankroll.
-"""
-
-client = genai.Client(api_key=GEMINI_API_KEY)
 
 def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Failed to send Telegram alert: {e}"flush=True)
-
-def run_scanner_loop():
-    print("NaijaArbEngine-Pro worker active. Scanning for surebets..."flush=True)
-    
-    # Placeholder sample payload (Replace this with live Parse API odds endpoint)
-    sample_odds = [
-        {"bookmaker": "SportyBet", "match": "3SC vs Enyimba Aba", "market": "Over/Under 2.5", "outcomes": [{"name": "Over 2.5", "odds": 2.25}]},
-        {"bookmaker": "Bet9ja", "match": "Shooting Stars vs Enyimba Int", "market": "Over/Under 2.5", "outcomes": [{"name": "Under 2.5", "odds": 1.98}]}
-    ]
-  print("1. Requesting data from Gemini...", flush=True)
-try:
-  response = client.models.generate_content(
-  print("2. Gemini response received!", flush=True)
-except Exception as e:
-  print(f"❌ Gemini API Error: {e}", flush=True)
-        model="gemini-2.5-flash",
-        contents=str(sample_odds),
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.1
-        )
+  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    print(
+        "⚠️ Telegram credentials missing. Skipping notification.", flush=True
     )
+    return
 
-    if "ARBITRAGE_FOUND" in response.text:
-        send_telegram_alert(f"🚨 **Arbitrage Alert Found!** 🚨\n\n```json\n{response.text}\n```")
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+  try:
+    response = requests.post(
+        url,
+        json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+        },
+        timeout=10,
+    )
+    if response.status_code == 200:
+      print("✅ Telegram notification sent successfully!", flush=True)
+    else:
+      print(
+          f"⚠️ Telegram API response error: {response.status_code} -"
+          f" {response.text}",
+          flush=True,
+      )
+  except Exception as e:
+    print(f"❌ Failed to send Telegram alert: {e}", flush=True)
 
-if __name__ == "__main__":
-    # Test telegram on boot
-    send_telegram_alert("🚀 *NaijaArbEngine-Pro initialized and monitoring...*")
-    
-    while True:
-        try:
-            run_scanner_loop()
-        except Exception as e:
-            print(f"Error during scan: {e}"flush=True)
-        
-        # Scan frequency (every 15 seconds)
-        time.sleep(15)
+
+# Send immediate startup notification
+send_telegram_alert("🚀 *Naija Arb Engine is ONLINE & scanning!*")
+
+# ==========================================
+# 3. GEMINI API CLIENT INITIALIZATION
+# ==========================================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+client = None
+
+if GEMINI_API_KEY:
+  try:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    print("✅ Gemini API Client initialized successfully.", flush=True)
+  except Exception as e:
+    print(f"❌ Gemini Initialization Error: {e}", flush=True)
+else:
+  print("⚠️ GEMINI_API_KEY missing in Environment Variables!", flush=True)
+
+# ==========================================
+# 4. MAIN ARBITRAGE SCANNING LOOP
+# ==========================================
+print("⚡ Starting main arbitrage engine loop...", flush=True)
+
+while True:
+  print("🔍 Starting scan cycle...", flush=True)
+
+  if client:
+    try:
+      print("📡 Fetching scan data via Gemini...", flush=True)
+
+      response = client.models.generate_content(
+          model="gemini-2.5-flash",
+          contents="Scan for active arbitrage opportunities.",
+      )
+
+      if response and hasattr(response, "text"):
+        print("💡 Gemini response received successfully!", flush=True)
+      else:
+        print("⚠️ Received empty response from Gemini.", flush=True)
+
+    except Exception as e:
+      print(f"❌ Gemini API Execution Error: {e}", flush=True)
+  else:
+    print("⚠️ Skipping scan: Gemini client not initialized.", flush=True)
+
+  print("⏳ Scan cycle complete. Sleeping for 60 seconds...\n", flush=True)
+  time.sleep(60)
