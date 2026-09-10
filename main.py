@@ -16,7 +16,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK - 2-Key High-Longevity Naija Arb Engine Online")
+        self.wfile.write(b"OK - Anti-Exhaustion Naija Arb Engine Online")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -71,9 +71,9 @@ def send_telegram_alert(message: str):
         print(f"❌ Telegram Connection Error: {e}", flush=True)
 
 # ==========================================
-# 3. 2-KEY ROUND-ROBIN MANAGER
+# 3. ROBUST KEY MANAGER WITH EXTENDED BACKOFF
 # ==========================================
-class TwoKeyManager:
+class RobustKeyManager:
     def __init__(self):
         raw_keys = [
             os.environ.get("GEMINI_API_KEY", "").strip(),
@@ -86,7 +86,7 @@ class TwoKeyManager:
         if not self.keys:
             print("❌ CRITICAL: No valid Gemini API keys detected!", flush=True)
         else:
-            print(f"🔑 Initialized 2-Key Longevity Manager with {len(self.keys)} key(s).", flush=True)
+            print(f"🔑 Initialized Manager with {len(self.keys)} key(s).", flush=True)
 
     def get_active_client(self):
         now = time.time()
@@ -95,12 +95,10 @@ class TwoKeyManager:
         if num_keys == 0:
             return None, None
 
-        # Check keys starting from current_index
         for offset in range(num_keys):
             idx = (self.current_index + offset) % num_keys
             if now >= self.cooldowns[idx]:
                 key = self.keys[idx]
-                # Advance index for next scan to ensure 50/50 round-robin load distribution
                 self.current_index = (idx + 1) % num_keys
                 try:
                     client = genai.Client(api_key=key)
@@ -108,20 +106,18 @@ class TwoKeyManager:
                 except Exception as e:
                     print(f"❌ Failed to build client for Key #{idx + 1}: {e}", flush=True)
 
-        # Both keys on cooldown -> Sleep until earliest reset + buffer
         earliest_reset = min(self.cooldowns.values())
-        wait_time = max(60, int(earliest_reset - now) + 30)
-        print(f"⏳ Both API keys on rate-limit cooldown. Resting engine for {wait_time // 60} minutes...", flush=True)
+        wait_time = max(300, int(earliest_reset - now) + 10)
+        print(f"⏳ All keys in cooldown. Resting engine for {wait_time // 60} minutes...", flush=True)
         time.sleep(wait_time)
         return self.get_active_client()
 
-    def mark_key_exhausted(self, key_num: int, cooldown_seconds: int = 1800):
-        # 30-minute cooldown if rate limit is reached
+    def mark_key_exhausted(self, key_num: int, cooldown_seconds: int = 3600):
         idx = key_num - 1
         self.cooldowns[idx] = time.time() + cooldown_seconds
-        print(f"⚠️ Key #{key_num} rate-limited (429). Cooldown set for {cooldown_seconds // 60} minutes.", flush=True)
+        print(f"⚠️ Key #{key_num} exhausted (429). Cooldown set for {cooldown_seconds // 60} minutes.", flush=True)
 
-key_manager = TwoKeyManager()
+key_manager = RobustKeyManager()
 
 # ==========================================
 # 4. PROMPT CONFIGURATION
@@ -179,12 +175,12 @@ search_config = types.GenerateContentConfig(
     tools=[types.Tool(google_search=types.GoogleSearch())]
 )
 
-send_telegram_alert("🇳🇬 *2-Key Naija Sports Engine ONLINE*\n\nRunning high-longevity 20-minute scans with ₦10,000 stake calculator.")
+send_telegram_alert("🇳🇬 *High-Longevity Naija Engine ONLINE*\n\nRunning 30-minute interval scans with 1-hour backoff recovery.")
 
 # ==========================================
-# 5. CONTINUOUS SCANNER LOOP (20-MIN INTERVAL)
+# 5. CONTINUOUS SCANNER LOOP (30-MIN INTERVAL)
 # ==========================================
-SCAN_INTERVAL_SECONDS = 1200  # 20 minutes (Optimized for maximum quota preservation)
+SCAN_INTERVAL_SECONDS = 1800  # 30 minutes between scans
 
 while True:
     print("\n🇳🇬 Starting Nigerian sports surebet scan cycle...", flush=True)
@@ -213,7 +209,8 @@ while True:
             print(f"❌ Gemini Execution Error on Key #{key_num}: {err_str}", flush=True)
 
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                key_manager.mark_key_exhausted(key_num, cooldown_seconds=1800)
+                # Set 1-hour cooldown upon daily quota/rate exhaustion
+                key_manager.mark_key_exhausted(key_num, cooldown_seconds=3600)
                 continue
     else:
         print("⚠️ Engine waiting for active API key...", flush=True)
