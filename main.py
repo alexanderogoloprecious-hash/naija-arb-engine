@@ -85,18 +85,28 @@ def send_telegram_alert(message):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Failed to send Telegram alert: {e}")
+        print(f"Failed to send Telegram alert: {e}"flush=True)
 
 def run_scanner_loop():
-    print("NaijaArbEngine-Pro worker active. Scanning for surebets...")
+    print("NaijaArbEngine-Pro worker active. Scanning for surebets..."flush=True)
     
     # Placeholder sample payload (Replace this with live Parse API odds endpoint)
     sample_odds = [
         {"bookmaker": "SportyBet", "match": "3SC vs Enyimba Aba", "market": "Over/Under 2.5", "outcomes": [{"name": "Over 2.5", "odds": 2.25}]},
         {"bookmaker": "Bet9ja", "match": "Shooting Stars vs Enyimba Int", "market": "Over/Under 2.5", "outcomes": [{"name": "Under 2.5", "odds": 1.98}]}
     ]
+print("1. Starting scan cycle...", flush=True)
 
+try:
+  print("2. Requesting data from Gemini...", flush=True)
+  # Your existing Gemini API call line here:
+  # response = model.generate_content(...
     response = client.models.generate_content(
+       print("3. Gemini response received!", flush=True)
+except Exception as e:
+  print(f"❌ Gemini API Error: {e}", flush=True)
+
+print("4. Scan cycle complete. Waiting for next run...\n", flush=True)
         model="gemini-2.5-flash",
         contents=str(sample_odds),
         config=types.GenerateContentConfig(
@@ -116,7 +126,7 @@ if __name__ == "__main__":
         try:
             run_scanner_loop()
         except Exception as e:
-            print(f"Error during scan: {e}")
+            print(f"Error during scan: {e}"flush=True)
         
         # Scan frequency (every 15 seconds)
         time.sleep(15)
