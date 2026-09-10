@@ -1,4 +1,21 @@
 import os
+import requests
+
+# Send test notification on startup
+token = os.environ.get("TELEGRAM_BOT_TOKEN")
+chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+if token and chat_id:
+  try:
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    requests.post(
+        url,
+        json={"chat_id": chat_id, "text": "🚀 Naija Arb Engine is now ONLINE!"},
+    )
+    print("Startup Telegram test sent successfully!", flush=True)
+  except Exception as e:
+    print(f"Telegram error: {e}", flush=True)
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
