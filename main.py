@@ -71,15 +71,15 @@ def send_telegram_alert(message: str):
         print(f"❌ Telegram Connection Error: {e}", flush=True)
 
 # ==========================================
-# 3. EXPANDED NIGERIAN BOOKMAKER WEB SEARCH
+# 3. DUCKDUCKGO WEB SEARCH (LIVE, TODAY & WEEKEND)
 # ==========================================
 def fetch_live_sports_data():
     queries = [
-        "Premier League odds Bet9ja SportyBet BetKing today",
-        "1xBet Nigeria vs Betway match odds football",
-        "Betano Nigeria MSport live match odds",
+        "Premier League match odds Bet9ja SportyBet BetKing today",
+        "1xBet Nigeria vs Betway football match odds today tomorrow",
+        "Betano Nigeria MSport upcoming weekend match odds",
         "22Bet Melbet football odds discrepancy Nigeria",
-        "SportyBet boosted odds vs Bet9ja live lines"
+        "SportyBet boosted odds vs Bet9ja pre-match lines"
     ]
     search_results = []
     
@@ -106,7 +106,7 @@ SYSTEM_PROMPT = """
 You are an expert quantitative sports arbitrage analyst specializing in ALL NIGERIAN BOOKMAKERS:
 (SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, Betano Nigeria, MSport, 22Bet, Melbet).
 
-Analyze the provided web search context and search for live/upcoming sports surebets.
+Analyze the provided web search context for LIVE, TODAY, and UPCOMING WEEKEND sports surebets.
 
 STRICT ARBITRAGE RULES:
 1. 2-Way Markets: (1/Odds1) + (1/Odds2) MUST be LESS THAN 1.00.
@@ -134,10 +134,10 @@ FORMAT OUTPUT EXACTLY AS:
 - **Net Guaranteed Profit**: ₦[Profit]
 
 ----------------------------------
-If no 100% mathematically confirmed surebet exists in this current data cycle, provide a short "All-Bookie Discrepancy Watchlist" across Bet9ja, SportyBet, BetKing, 1xBet, Betway, Betano, MSport, and 22Bet.
+If no 100% mathematically confirmed surebet exists in this current data cycle, provide a short "All-Bookie Discrepancy Watchlist" across live, today, and upcoming games for Bet9ja, SportyBet, BetKing, 1xBet, Betway, Betano, MSport, 22Bet, and Melbet.
 """
 
-send_telegram_alert("🇳🇬 *All-Bookmaker Naija Engine ONLINE*\n\nScanning SportyBet, Bet9ja, BetKing, 1xBet, Betway, Betano, MSport & 22Bet every 15 minutes.")
+send_telegram_alert("🇳🇬 *All-Bookmaker Naija Engine ONLINE*\n\nScanning Live, Today & Weekend fixtures across 9 Nigerian Bookmakers every 15 minutes.")
 
 # ==========================================
 # 5. CONTINUOUS SCANNER LOOP
@@ -145,7 +145,7 @@ send_telegram_alert("🇳🇬 *All-Bookmaker Naija Engine ONLINE*\n\nScanning Sp
 SCAN_INTERVAL_SECONDS = 900  # 15 minutes
 
 while True:
-    print("\n🇳🇬 Gathering live sports data across all Nigerian bookmakers...", flush=True)
+    print("\n🇳🇬 Gathering live & upcoming sports data across all Nigerian bookmakers...", flush=True)
     live_data = fetch_live_sports_data()
 
     if client:
