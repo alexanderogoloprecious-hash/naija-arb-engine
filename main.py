@@ -93,12 +93,13 @@ def fetch_live_sports_data():
         return "No external web search results available."
 
 # ==========================================
-# 4. GEMINI ANALYSIS & PROMPT
+# 4. GEMINI CLIENT & PROMPT
 # ==========================================
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=api_key) if api_key else None
 
-MODEL_NAME = "gemini-2.5-flash"
+# Updated to gemini-3.6-flash to fix the 404 NOT_FOUND error
+MODEL_NAME = "gemini-3.6-flash"
 
 SYSTEM_PROMPT = """
 You are an expert quantitative sports arbitrage analyst specializing in NIGERIAN BOOKMAKERS (SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, MSport).
@@ -134,7 +135,7 @@ FORMAT OUTPUT EXACTLY AS:
 If no 100% mathematically confirmed surebet exists in this data, provide a short "High-Odds Discrepancy Watchlist" across SportyBet, Bet9ja, and BetKing.
 """
 
-send_telegram_alert("🇳🇬 *Free-Tier Naija Sports Engine ONLINE*\n\nRunning 15-minute search cycles without API billing requirements.")
+send_telegram_alert("🇳🇬 *Free-Tier Naija Sports Engine ONLINE*\n\nRunning 15-minute search cycles with gemini-3.6-flash.")
 
 # ==========================================
 # 5. CONTINUOUS SCANNER LOOP
