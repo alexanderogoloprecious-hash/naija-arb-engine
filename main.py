@@ -4,7 +4,7 @@ import threading
 import time
 import requests
 from google import genai
-from google.genai import types
+from duckduckgo_search import DDGS
 
 # ==========================================
 # 1. RENDER PORT BINDING (HEALTH CHECK)
@@ -16,7 +16,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK - Anti-Exhaustion Naija Arb Engine Online")
+        self.wfile.write(b"OK - Free Search Naija Arb Engine Online")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -47,7 +47,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Missing Telegram credentials in Environment.", flush=True)
+        print("⚠️ Missing Telegram credentials.", flush=True)
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -64,156 +64,105 @@ def send_telegram_alert(message: str):
             res = requests.post(url, json=payload, timeout=12)
 
         if res.status_code == 200:
-            print("✅ Telegram alert delivered successfully!", flush=True)
+            print("✅ Telegram alert delivered!", flush=True)
         else:
-            print(f"❌ Telegram API Error ({res.status_code}): {res.text}", flush=True)
+            print(f"❌ Telegram Error ({res.status_code}): {res.text}", flush=True)
     except Exception as e:
         print(f"❌ Telegram Connection Error: {e}", flush=True)
 
 # ==========================================
-# 3. ROBUST KEY MANAGER WITH EXTENDED BACKOFF
+# 3. FREE DUCKDUCKGO WEB SEARCH
 # ==========================================
-class RobustKeyManager:
-    def __init__(self):
-        raw_keys = [
-            os.environ.get("GEMINI_API_KEY", "").strip(),
-            os.environ.get("GEMINI_API_KEY_2", "").strip(),
-        ]
-        self.keys = [k for k in raw_keys if k]
-        self.cooldowns = {i: 0 for i in range(len(self.keys))}
-        self.current_index = 0
-
-        if not self.keys:
-            print("❌ CRITICAL: No valid Gemini API keys detected!", flush=True)
-        else:
-            print(f"🔑 Initialized Manager with {len(self.keys)} key(s).", flush=True)
-
-    def get_active_client(self):
-        now = time.time()
-        num_keys = len(self.keys)
-
-        if num_keys == 0:
-            return None, None
-
-        for offset in range(num_keys):
-            idx = (self.current_index + offset) % num_keys
-            if now >= self.cooldowns[idx]:
-                key = self.keys[idx]
-                self.current_index = (idx + 1) % num_keys
-                try:
-                    client = genai.Client(api_key=key)
-                    return client, idx + 1
-                except Exception as e:
-                    print(f"❌ Failed to build client for Key #{idx + 1}: {e}", flush=True)
-
-        earliest_reset = min(self.cooldowns.values())
-        wait_time = max(300, int(earliest_reset - now) + 10)
-        print(f"⏳ All keys in cooldown. Resting engine for {wait_time // 60} minutes...", flush=True)
-        time.sleep(wait_time)
-        return self.get_active_client()
-
-    def mark_key_exhausted(self, key_num: int, cooldown_seconds: int = 3600):
-        idx = key_num - 1
-        self.cooldowns[idx] = time.time() + cooldown_seconds
-        print(f"⚠️ Key #{key_num} exhausted (429). Cooldown set for {cooldown_seconds // 60} minutes.", flush=True)
-
-key_manager = RobustKeyManager()
+def fetch_live_sports_data():
+    queries = [
+        "SportyBet Nigeria live match odds today",
+        "Bet9ja football odds today",
+        "BetKing match odds Nigeria"
+    ]
+    search_results = []
+    
+    try:
+        with DDGS() as ddgs:
+            for q in queries:
+                results = list(ddgs.text(q, max_results=3))
+                for r in results:
+                    search_results.append(f"Title: {r.get('title')}\nSnippet: {r.get('body')}")
+        return "\n\n".join(search_results)
+    except Exception as e:
+        print(f"⚠️ Search error: {e}", flush=True)
+        return "No external web search results available."
 
 # ==========================================
-# 4. PROMPT CONFIGURATION
+# 4. GEMINI ANALYSIS & PROMPT
 # ==========================================
-MODEL_NAME = "gemini-3.6-flash"
+api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+client = genai.Client(api_key=api_key) if api_key else None
 
-NIGERIAN_SPORTS_SUREBET_PROMPT = """
-You are an expert quantitative sports arbitrage analyst specializing exclusively in NIGERIAN BOOKMAKERS.
+MODEL_NAME = "gemini-2.5-flash"
 
-Scour live and upcoming sports matches across licensed sportsbooks in Nigeria:
-- SportyBet Nigeria
-- Bet9ja
-- BetKing
-- 1xBet Nigeria
-- Betway Nigeria
-- MSport
-- Betano Nigeria
-- 22Bet Nigeria
-- Melbet Nigeria
+SYSTEM_PROMPT = """
+You are an expert quantitative sports arbitrage analyst specializing in NIGERIAN BOOKMAKERS (SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, MSport).
 
-STRICT RULES & MATHEMATICAL VALIDATION:
-1. ARBITRAGE FORMULA VALIDATION:
-   - 2-Way Markets: (1 / Odds1) + (1 / Odds2) MUST be strictly LESS THAN 1.00.
-   - 3-Way Markets: (1 / Odds1) + (1 / Odds2) + (1 / Odds3) MUST be strictly LESS THAN 1.00.
-   - Profit Margin % = ((1 / Sum of Implied Probabilities) - 1) * 100.
-2. HIGH-DISCREPANCY MARKETS: Prioritize Football (1X2, Over/Under 2.5/3.5, BTTS), Basketball (Moneyline, Spread), and Tennis.
-3. BUDGET STAKE ALLOCATION: Calculate exact stake distribution for a TOTAL BUDGET OF ₦10,000 NAIRA.
-4. NIGERIAN CONTEXT ONLY: Do NOT include foreign non-Nigerian bookies, crypto, forex, or non-sports markets.
+Analyze the provided web search context and search for live/upcoming sports surebets.
 
-FORMAT TELEGRAM OUTPUT EXACTLY AS:
+STRICT ARBITRAGE RULES:
+1. 2-Way Markets: (1/Odds1) + (1/Odds2) MUST be LESS THAN 1.00.
+2. 3-Way Markets: (1/Odds1) + (1/Odds2) + (1/Odds3) MUST be LESS THAN 1.00.
+3. Profit Margin % = ((1 / Sum of Implied Probabilities) - 1) * 100.
+4. Calculate stake distribution for a TOTAL BUDGET OF ₦10,000 NAIRA.
+
+FORMAT OUTPUT EXACTLY AS:
 
 🔥 **HIGH-YIELD NAIJA SUREBET DETECTED**
 ----------------------------------
 📌 **Event**: [Sport / League] — [Team A vs Team B]
 ⏰ **Kickoff**: [Match Date & Time]
-🎯 **Market**: [e.g., Over/Under 2.5 Goals / Match Winner 1X2]
+🎯 **Market**: [Over/Under 2.5 / 1X2]
 
 📊 **VERIFIED ODDS & BOOKMAKERS**:
-- **Selection 1**: [Option 1] @ **[Odds]** on **[Nigerian Bookmaker 1]**
-- **Selection 2**: [Option 2] @ **[Odds]** on **[Nigerian Bookmaker 2]**
-- (Selection 3 if 3-way) @ **[Odds]** on **[Nigerian Bookmaker 3]**
+- **Selection 1**: [Option 1] @ **[Odds]** on **[Bookmaker 1]**
+- **Selection 2**: [Option 2] @ **[Bookmaker 2]**
 
 📈 **GUARANTEED PROFIT MARGIN**: **[X.XX]%**
 
-💰 **STAKE ALLOCATION (₦10,000 TOTAL BUDGET)**:
+💰 **STAKE ALLOCATION (₦10,000 BUDGET)**:
 - **Stake ₦[Amount]** on [Selection 1] @ [Bookmaker 1] ➔ Expected Return: ₦[Return]
 - **Stake ₦[Amount]** on [Selection 2] @ [Bookmaker 2] ➔ Expected Return: ₦[Return]
 - **Net Guaranteed Profit**: ₦[Profit]
 
 ----------------------------------
-If no 100% mathematically confirmed surebet exists in this current cycle, output a concise "High-Odds Discrepancy Watchlist" highlighting top matches currently monitored across SportyBet, Bet9ja, and BetKing.
+If no 100% mathematically confirmed surebet exists in this data, provide a short "High-Odds Discrepancy Watchlist" across SportyBet, Bet9ja, and BetKing.
 """
 
-search_config = types.GenerateContentConfig(
-    tools=[types.Tool(google_search=types.GoogleSearch())]
-)
-
-send_telegram_alert("🇳🇬 *High-Longevity Naija Engine ONLINE*\n\nRunning 30-minute interval scans with 1-hour backoff recovery.")
+send_telegram_alert("🇳🇬 *Free-Tier Naija Sports Engine ONLINE*\n\nRunning 15-minute search cycles without API billing requirements.")
 
 # ==========================================
-# 5. CONTINUOUS SCANNER LOOP (30-MIN INTERVAL)
+# 5. CONTINUOUS SCANNER LOOP
 # ==========================================
-SCAN_INTERVAL_SECONDS = 1800  # 30 minutes between scans
+SCAN_INTERVAL_SECONDS = 900  # 15 minutes
 
 while True:
-    print("\n🇳🇬 Starting Nigerian sports surebet scan cycle...", flush=True)
-
-    client, key_num = key_manager.get_active_client()
+    print("\n🇳🇬 Gathering live Nigerian sports data via free search...", flush=True)
+    live_data = fetch_live_sports_data()
 
     if client:
         try:
-            print(f"📡 Querying Gemini ({MODEL_NAME}) using Key #{key_num}...", flush=True)
-
+            print(f"📡 Analyzing odds with Gemini ({MODEL_NAME})...", flush=True)
+            user_content = f"LIVE SEARCH DATA:\n{live_data}\n\n{SYSTEM_PROMPT}"
+            
             response = client.models.generate_content(
                 model=MODEL_NAME,
-                contents=NIGERIAN_SPORTS_SUREBET_PROMPT,
-                config=search_config
+                contents=user_content
             )
 
             if response and hasattr(response, "text") and response.text:
-                print(f"💡 Scan completed successfully using Key #{key_num}! Sending alert...", flush=True)
-                alert_msg = f"⚽ *Naija Sports Surebet Alert*\n\n{response.text[:3500]}"
-                send_telegram_alert(alert_msg)
+                print("💡 Analysis complete! Sending Telegram alert...", flush=True)
+                send_telegram_alert(f"⚽ *Naija Sports Surebet Alert*\n\n{response.text[:3500]}")
             else:
-                print("⚠️ Empty response received from Gemini.", flush=True)
+                print("⚠️ Empty response from Gemini.", flush=True)
 
         except Exception as e:
-            err_str = str(e)
-            print(f"❌ Gemini Execution Error on Key #{key_num}: {err_str}", flush=True)
+            print(f"❌ Gemini Execution Error: {e}", flush=True)
 
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                # Set 1-hour cooldown upon daily quota/rate exhaustion
-                key_manager.mark_key_exhausted(key_num, cooldown_seconds=3600)
-                continue
-    else:
-        print("⚠️ Engine waiting for active API key...", flush=True)
-
-    print(f"⏳ Waiting {SCAN_INTERVAL_SECONDS // 60} minutes for next scan cycle...", flush=True)
+    print(f"⏳ Waiting {SCAN_INTERVAL_SECONDS // 60} minutes for next cycle...", flush=True)
     time.sleep(SCAN_INTERVAL_SECONDS)
