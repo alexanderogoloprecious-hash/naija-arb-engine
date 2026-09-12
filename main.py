@@ -16,7 +16,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK - Free Search Naija Arb Engine Online")
+        self.wfile.write(b"OK - Multi-Bookmaker Naija Arb Engine Online")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -71,20 +71,22 @@ def send_telegram_alert(message: str):
         print(f"❌ Telegram Connection Error: {e}", flush=True)
 
 # ==========================================
-# 3. FREE DUCKDUCKGO WEB SEARCH
+# 3. EXPANDED NIGERIAN BOOKMAKER WEB SEARCH
 # ==========================================
 def fetch_live_sports_data():
     queries = [
-        "SportyBet Nigeria live match odds today",
-        "Bet9ja football odds today",
-        "BetKing match odds Nigeria"
+        "Premier League odds Bet9ja SportyBet BetKing today",
+        "1xBet Nigeria vs Betway match odds football",
+        "Betano Nigeria MSport live match odds",
+        "22Bet Melbet football odds discrepancy Nigeria",
+        "SportyBet boosted odds vs Bet9ja live lines"
     ]
     search_results = []
     
     try:
         with DDGS() as ddgs:
             for q in queries:
-                results = list(ddgs.text(q, max_results=3))
+                results = list(ddgs.text(q, max_results=2))
                 for r in results:
                     search_results.append(f"Title: {r.get('title')}\nSnippet: {r.get('body')}")
         return "\n\n".join(search_results)
@@ -93,16 +95,16 @@ def fetch_live_sports_data():
         return "No external web search results available."
 
 # ==========================================
-# 4. GEMINI CLIENT & PROMPT
+# 4. GEMINI CLIENT & PROMPT CONFIGURATION
 # ==========================================
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=api_key) if api_key else None
 
-# Updated to gemini-3.6-flash to fix the 404 NOT_FOUND error
 MODEL_NAME = "gemini-3.6-flash"
 
 SYSTEM_PROMPT = """
-You are an expert quantitative sports arbitrage analyst specializing in NIGERIAN BOOKMAKERS (SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, MSport).
+You are an expert quantitative sports arbitrage analyst specializing in ALL NIGERIAN BOOKMAKERS:
+(SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, Betano Nigeria, MSport, 22Bet, Melbet).
 
 Analyze the provided web search context and search for live/upcoming sports surebets.
 
@@ -118,11 +120,11 @@ FORMAT OUTPUT EXACTLY AS:
 ----------------------------------
 📌 **Event**: [Sport / League] — [Team A vs Team B]
 ⏰ **Kickoff**: [Match Date & Time]
-🎯 **Market**: [Over/Under 2.5 / 1X2]
+🎯 **Market**: [Over/Under / 1X2 / BTTS / Asian Handicap]
 
 📊 **VERIFIED ODDS & BOOKMAKERS**:
 - **Selection 1**: [Option 1] @ **[Odds]** on **[Bookmaker 1]**
-- **Selection 2**: [Option 2] @ **[Bookmaker 2]**
+- **Selection 2**: [Option 2] @ **[Odds]** on **[Bookmaker 2]**
 
 📈 **GUARANTEED PROFIT MARGIN**: **[X.XX]%**
 
@@ -132,10 +134,10 @@ FORMAT OUTPUT EXACTLY AS:
 - **Net Guaranteed Profit**: ₦[Profit]
 
 ----------------------------------
-If no 100% mathematically confirmed surebet exists in this data, provide a short "High-Odds Discrepancy Watchlist" across SportyBet, Bet9ja, and BetKing.
+If no 100% mathematically confirmed surebet exists in this current data cycle, provide a short "All-Bookie Discrepancy Watchlist" across Bet9ja, SportyBet, BetKing, 1xBet, Betway, Betano, MSport, and 22Bet.
 """
 
-send_telegram_alert("🇳🇬 *Free-Tier Naija Sports Engine ONLINE*\n\nRunning 15-minute search cycles with gemini-3.6-flash.")
+send_telegram_alert("🇳🇬 *All-Bookmaker Naija Engine ONLINE*\n\nScanning SportyBet, Bet9ja, BetKing, 1xBet, Betway, Betano, MSport & 22Bet every 15 minutes.")
 
 # ==========================================
 # 5. CONTINUOUS SCANNER LOOP
@@ -143,12 +145,12 @@ send_telegram_alert("🇳🇬 *Free-Tier Naija Sports Engine ONLINE*\n\nRunning 
 SCAN_INTERVAL_SECONDS = 900  # 15 minutes
 
 while True:
-    print("\n🇳🇬 Gathering live Nigerian sports data via free search...", flush=True)
+    print("\n🇳🇬 Gathering live sports data across all Nigerian bookmakers...", flush=True)
     live_data = fetch_live_sports_data()
 
     if client:
         try:
-            print(f"📡 Analyzing odds with Gemini ({MODEL_NAME})...", flush=True)
+            print(f"📡 Analyzing multi-bookmaker odds with Gemini ({MODEL_NAME})...", flush=True)
             user_content = f"LIVE SEARCH DATA:\n{live_data}\n\n{SYSTEM_PROMPT}"
             
             response = client.models.generate_content(
