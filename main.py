@@ -20,12 +20,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Initialize Gemini Client
-client = genai.Client(api_key=GEMINI_API_KEY)
-
 
 class KeepAliveServer(BaseHTTPRequestHandler):
-    """HTTP server for Render health checks and UptimeRobot keep-alive pings (supports GET, HEAD, POST)."""
+    """HTTP server for Render health checks and UptimeRobot keep-alive pings."""
     
     def _send_success(self):
         self.send_response(200)
@@ -44,7 +41,7 @@ class KeepAliveServer(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
-        return  # Suppress verbose HTTP access logs in console
+        return  # Suppress HTTP access logs in console
 
 
 def start_health_server():
@@ -69,7 +66,6 @@ def send_telegram_message(text):
     try:
         res = requests.post(url, json=payload, timeout=15)
         if not res.ok:
-            # Fallback to plain text if Markdown formatting encounters unexpected characters
             payload.pop("parse_mode")
             requests.post(url, json=payload, timeout=15)
         logging.info("Telegram alert delivered successfully.")
@@ -96,7 +92,7 @@ def fetch_live_odds_context():
                 res = requests.get(url, params=params, timeout=10)
                 if res.ok:
                     data = res.json()
-                    for match in data[:3]:  # Top 3 upcoming matches per league
+                    for match in data[:3]:
                         home = match.get("home_team")
                         away = match.get("away_team")
                         start_time = match.get("commence_time")
@@ -115,7 +111,6 @@ def fetch_live_odds_context():
         if odds_summary:
             return "\n\n".join(odds_summary)
 
-    # Search fallback if API key is missing or returning empty data
     logging.info("Using DuckDuckGo context search fallback...")
     query = "Nigerian bookmaker odds Bet9ja SportyBet 1xBet BetKing Betway Betano MSport live matches today"
     try:
@@ -129,7 +124,11 @@ def fetch_live_odds_context():
 
 
 def run_arbitrage_scan():
-    """Scans live odds, enforces 30% ROI minimum, and pushes structured Telegram updates."""
+    """Scans live odds, enforces 30% ROI minimum, and pushes structured Telegram updates with retry logic."""
+    if not GEMINI_API_KEY:
+        logging.error("GEMINI_API_KEY missing in environment variables.")
+        return
+
     logging.info("Starting new odds scan cycle...")
     odds_context = fetch_live_odds_context()
 
@@ -182,15 +181,28 @@ def run_arbitrage_scan():
     2. Account for withdrawal fees and settlement rules.
     """
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt
-        )
-        report = response.text.strip()
-        send_telegram_message(report)
-    except Exception as e:
-        logging.error(f"Gemini API scan execution failed: {e}")
+    # Retry loop with exponential backoff for 503 Service Unavailable errors
+    max_retries = 3
+    retry_delay = 10  # Seconds to wait before retrying
+
+    for attempt in range(max_retries):
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=prompt
+            )
+            report = response.text.strip()
+            send_telegram_message(report)
+            break  # Exit retry loop on successful execution
+        except Exception as e:
+            logging.warning(f"Gemini API attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                logging.info(f"Retrying scan in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Double wait time for next retry
+            else:
+                logging.error("All Gemini API retry attempts exhausted for this cycle.")
 
 
 def main():
