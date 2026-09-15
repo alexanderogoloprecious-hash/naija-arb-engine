@@ -24,15 +24,27 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 class KeepAliveServer(BaseHTTPRequestHandler):
-    """Simple HTTP server to satisfy Render health checks and UptimeRobot keep-alive pings."""
-    def do_GET(self):
+    """HTTP server for Render health checks and UptimeRobot pings (supports GET, HEAD, POST)."""
+    
+    def _send_success(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
+
+    def do_GET(self):
+        self._send_success()
         self.wfile.write(b"Naija Arb Engine is ONLINE and active.")
 
+    def do_HEAD(self):
+        # Handles UptimeRobot HEAD requests
+        self._send_success()
+
+    def do_POST(self):
+        # Handles potential webhook/POST pings
+        self.do_GET()
+
     def log_message(self, format, *args):
-        return  # Suppress verbose HTTP access logs in console
+        return  # Suppress HTTP access logs in console
 
 
 def start_health_server():
@@ -44,7 +56,7 @@ def start_health_server():
 def send_telegram_message(text):
     """Sends clean text alerts to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("Telegram environment variables missing!")
+        logging.error("Telegram credentials missing!")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -66,7 +78,7 @@ def send_telegram_message(text):
 
 
 def fetch_live_odds_context():
-    """Fetches real-time odds data from Nigerian bookies using DuckDuckGo."""
+    """Fetches real-time odds data using DuckDuckGo."""
     query = "Nigerian bookmaker odds Bet9ja SportyBet 1xBet BetKing Betway Betano MSport live matches today"
     try:
         with DDGS() as ddgs:
@@ -79,7 +91,7 @@ def fetch_live_odds_context():
 
 
 def run_arbitrage_scan():
-    """Scans for sports arbitrage, calculates profit metrics, and sends Telegram updates."""
+    """Scans for sports arbitrage, enforces 30% ROI minimum, and pushes Telegram updates."""
     logging.info("Starting new odds scan cycle...")
     odds_context = fetch_live_odds_context()
 
@@ -134,7 +146,7 @@ def run_arbitrage_scan():
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt
         )
         report = response.text.strip()
@@ -148,7 +160,7 @@ def main():
     threading.Thread(target=start_health_server, daemon=True).start()
 
     # Send initial online message
-    send_telegram_message("🇳🇬 **All-Bookmaker Naija Engine ONLINE**\n\nScanning live fixtures every 15 minutes with a minimum 30% ROI target (N10,000 -> N13,000+ return).")
+    send_telegram_message("🇳🇬 **All-Bookmaker Naija Engine ONLINE**\n\nScanning live fixtures every 15 minutes with gemini-3.6-flash and 30% ROI target (N10,000 -> N13,000+ return).")
 
     # Automated 15-minute loop
     while True:
