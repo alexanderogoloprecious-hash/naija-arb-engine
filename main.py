@@ -20,9 +20,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
+# Quota Protection: Default to 1800s (30 mins) to preserve free tier quota (500 requests/month)
+SCAN_INTERVAL_SECONDS = int(os.environ.get("SCAN_INTERVAL_SECONDS", 1800))
+
 
 class KeepAliveServer(BaseHTTPRequestHandler):
-    """HTTP server for Render health checks and UptimeRobot keep-alive pings."""
+    """HTTP server for Render health checks and UptimeRobot keep-alive pings (supports GET, HEAD, POST)."""
     
     def _send_success(self):
         self.send_response(200)
@@ -92,7 +95,7 @@ def fetch_live_odds_context():
                 res = requests.get(url, params=params, timeout=10)
                 if res.ok:
                     data = res.json()
-                    for match in data[:3]:
+                    for match in data[:3]:  # Top 3 upcoming matches per league
                         home = match.get("home_team")
                         away = match.get("away_team")
                         start_time = match.get("commence_time")
@@ -124,7 +127,7 @@ def fetch_live_odds_context():
 
 
 def run_arbitrage_scan():
-    """Scans live odds, enforces 30% ROI minimum, and pushes structured Telegram updates with retry logic."""
+    """Scans live odds, enforces 30% ROI minimum, and pushes structured Telegram updates with exponential backoff retry."""
     if not GEMINI_API_KEY:
         logging.error("GEMINI_API_KEY missing in environment variables.")
         return
@@ -181,9 +184,9 @@ def run_arbitrage_scan():
     2. Account for withdrawal fees and settlement rules.
     """
 
-    # Retry loop with exponential backoff for 503 Service Unavailable errors
+    # Retry loop with exponential backoff for temporary 503 high-demand spikes
     max_retries = 3
-    retry_delay = 10  # Seconds to wait before retrying
+    retry_delay = 10
 
     for attempt in range(max_retries):
         try:
@@ -194,13 +197,13 @@ def run_arbitrage_scan():
             )
             report = response.text.strip()
             send_telegram_message(report)
-            break  # Exit retry loop on successful execution
+            break
         except Exception as e:
             logging.warning(f"Gemini API attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 logging.info(f"Retrying scan in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-                retry_delay *= 2  # Double wait time for next retry
+                retry_delay *= 2
             else:
                 logging.error("All Gemini API retry attempts exhausted for this cycle.")
 
@@ -210,17 +213,17 @@ def main():
     threading.Thread(target=start_health_server, daemon=True).start()
 
     # Send initial online notification
-    send_telegram_message("🇳🇬 **All-Bookmaker Naija Engine ONLINE**\n\nScanning live fixtures every 15 minutes with gemini-3.6-flash and 30% ROI target (N10,000 -> N13,000+ return).")
+    send_telegram_message("🇳🇬 **All-Bookmaker Naija Engine ONLINE**\n\nScanning live fixtures with gemini-3.6-flash and 30% ROI target (N10,000 -> N13,000+ return).")
 
-    # Automated 15-minute loop
+    # Automated sleep cycle loop
     while True:
         try:
             run_arbitrage_scan()
         except Exception as e:
             logging.error(f"Unexpected error in main loop: {e}")
         
-        logging.info("Sleeping for 15 minutes...")
-        time.sleep(900)
+        logging.info(f"Sleeping for {SCAN_INTERVAL_SECONDS} seconds...")
+        time.sleep(SCAN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
