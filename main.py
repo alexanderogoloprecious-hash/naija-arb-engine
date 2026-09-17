@@ -1,230 +1,174 @@
+import http.server
 import os
-import time
-import logging
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
 import requests
-from duckduckgo_search import DDGS
 from google import genai
+from duckduckgo_search import DDGS
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-
-# Environment Variables
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+# ==========================================
+# 1. RENDER PORT BINDING (HEALTH CHECK)
+# ==========================================
 PORT = int(os.environ.get("PORT", 10000))
 
-# Quota Protection: Default to 1800s (30 mins) to preserve free tier quota (500 requests/month)
-SCAN_INTERVAL_SECONDS = int(os.environ.get("SCAN_INTERVAL_SECONDS", 1800))
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - Multi-Bookmaker Naija Arb Engine Online")
 
-
-class KeepAliveServer(BaseHTTPRequestHandler):
-    """HTTP server for Render health checks and UptimeRobot keep-alive pings (supports GET, HEAD, POST)."""
-    
-    def _send_success(self):
+    def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
 
-    def do_GET(self):
-        self._send_success()
-        self.wfile.write(b"Naija Arb Engine is ONLINE and active.")
-
-    def do_HEAD(self):
-        self._send_success()
-
-    def do_POST(self):
-        self._send_success()
-        self.wfile.write(b"OK")
-
     def log_message(self, format, *args):
-        return  # Suppress HTTP access logs in console
-
+        return
 
 def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), KeepAliveServer)
-    logging.info(f"Health check server listening on port {PORT}...")
-    server.serve_forever()
+    try:
+        server_address = ("0.0.0.0", PORT)
+        httpd = http.server.ThreadingHTTPServer(server_address, HealthCheckHandler)
+        print(f"✅ Render Web Port Listener active on 0.0.0.0:{PORT}", flush=True)
+        httpd.serve_forever()
+    except Exception as e:
+        print(f"❌ Web Port Error: {e}", flush=True)
 
+threading.Thread(target=start_health_server, daemon=True).start()
+time.sleep(1)
 
-def send_telegram_message(text):
-    """Sends clean text alerts to Telegram with plain text fallback."""
+# ==========================================
+# 2. TELEGRAM ALERT SYSTEM
+# ==========================================
+raw_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_TOKEN = raw_token[3:] if raw_token.lower().startswith("bot") else raw_token
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("Telegram credentials missing!")
+        print("⚠️ Missing Telegram credentials.", flush=True)
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
+        "text": message,
         "parse_mode": "Markdown",
-        "disable_web_page_preview": True
     }
+
     try:
-        res = requests.post(url, json=payload, timeout=15)
-        if not res.ok:
-            payload.pop("parse_mode")
-            requests.post(url, json=payload, timeout=15)
-        logging.info("Telegram alert delivered successfully.")
+        res = requests.post(url, json=payload, timeout=12)
+        if res.status_code == 400 and "parse" in res.text.lower():
+            payload.pop("parse_mode", None)
+            res = requests.post(url, json=payload, timeout=12)
+
+        if res.status_code == 200:
+            print("✅ Telegram alert delivered!", flush=True)
+        else:
+            print(f"❌ Telegram Error ({res.status_code}): {res.text}", flush=True)
     except Exception as e:
-        logging.error(f"Failed to send Telegram message: {e}")
+        print(f"❌ Telegram Connection Error: {e}", flush=True)
 
-
-def fetch_live_odds_context():
-    """Fetches real odds data from The Odds API with DuckDuckGo fallback."""
-    if ODDS_API_KEY:
-        logging.info("Fetching real odds via The Odds API...")
-        sports = ["soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league"]
-        odds_summary = []
-
-        for sport in sports:
-            url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
-            params = {
-                "apiKey": ODDS_API_KEY,
-                "regions": "eu,uk",
-                "markets": "h2h,totals",
-                "oddsFormat": "decimal"
-            }
-            try:
-                res = requests.get(url, params=params, timeout=10)
-                if res.ok:
-                    data = res.json()
-                    for match in data[:3]:  # Top 3 upcoming matches per league
-                        home = match.get("home_team")
-                        away = match.get("away_team")
-                        start_time = match.get("commence_time")
-                        
-                        lines = []
-                        for b in match.get("bookmakers", []):
-                            for market in b.get("markets", []):
-                                outcomes = [f"{o['name']}: {o['price']}" for o in market.get("outcomes", [])]
-                                lines.append(f"  * {b['title']} ({market['key']}): {', '.join(outcomes)}")
-
-                        if lines:
-                            odds_summary.append(f"Match: {home} vs {away} (Starts: {start_time})\n" + "\n".join(lines[:4]))
-            except Exception as e:
-                logging.warning(f"Error fetching odds for {sport}: {e}")
-
-        if odds_summary:
-            return "\n\n".join(odds_summary)
-
-    logging.info("Using DuckDuckGo context search fallback...")
-    query = "Nigerian bookmaker odds Bet9ja SportyBet 1xBet BetKing Betway Betano MSport live matches today"
+# ==========================================
+# 3. EXPANDED NIGERIAN BOOKMAKER WEB SEARCH
+# ==========================================
+def fetch_live_sports_data():
+    queries = [
+        "Premier League football match dates odds Bet9ja SportyBet BetKing today",
+        "NPFL Nigeria football match date live odds 1xBet Betway",
+        "Betano Nigeria MSport live match kickoff time odds",
+        "22Bet Melbet football odds discrepancy fixture date Nigeria",
+        "SportyBet boosted odds vs Bet9ja live lines today date"
+    ]
+    search_results = []
+    
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=8))
-            snippets = [r.get("body", "") for r in results]
-            return "\n".join(snippets)
+            for q in queries:
+                results = list(ddgs.text(q, max_results=2))
+                for r in results:
+                    search_results.append(f"Title: {r.get('title')}\nSnippet: {r.get('body')}")
+        return "\n\n".join(search_results)
     except Exception as e:
-        logging.warning(f"Live search fetch warning: {e}")
-        return "Standard live odds monitoring active."
+        print(f"⚠️ Search error: {e}", flush=True)
+        return "No external web search results available."
 
+# ==========================================
+# 4. GEMINI CLIENT & PROMPT CONFIGURATION
+# ==========================================
+api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+client = genai.Client(api_key=api_key) if api_key else None
 
-def run_arbitrage_scan():
-    """Scans live odds, enforces 30% ROI minimum, and pushes structured Telegram updates with exponential backoff retry."""
-    if not GEMINI_API_KEY:
-        logging.error("GEMINI_API_KEY missing in environment variables.")
-        return
+MODEL_NAME = "gemini-3.6-flash"
 
-    logging.info("Starting new odds scan cycle...")
-    odds_context = fetch_live_odds_context()
+SYSTEM_PROMPT = """
+You are an expert quantitative sports arbitrage analyst specializing in ALL NIGERIAN BOOKMAKERS:
+(SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, Betano Nigeria, MSport, 22Bet, Melbet).
 
-    prompt = f"""
-    You are an expert sports arbitrage scanner monitoring 9 Nigerian bookmakers:
-    Bet9ja, SportyBet, 1xBet Nigeria, BetKing, Betway Nigeria, Betano Nigeria, MSport, 22Bet, and Melbet.
+Analyze the provided web search context and search for live/upcoming sports surebets.
 
-    Live Market Odds Context:
-    {odds_context}
+CRITICAL MANDATE:
+Every single match reported (whether a High-Yield Surebet or a Discrepancy Watchlist item) MUST display the EXACT or ESTIMATED Match Date and Kickoff Time (e.g., "17 Sep 2026, 04:00 PM WAT" or "Today, 17 Sep @ 16:00"). NEVER omit the match date.
 
-    CRITICAL RULES & TARGETS:
-    1. TARGET PROFIT THRESHOLD: 30.00% MINIMUM ROI.
-       - Implied Probability Sum = (1 / Odds_1) + (1 / Odds_2)
-       - A 30% profit target requires Implied Probability Sum <= 0.7692 (e.g., N10,000 total bet returns N13,000+ total payout).
-    2. STAKE CALCULATION MODEL (For N10,000 Total Capital):
-       - Stake 1 = N10,000 / (Implied Sum * Odds_1)
-       - Stake 2 = N10,000 / (Implied Sum * Odds_2)
-       - Total Return must equal or exceed N13,000.
-    3. FORMATTING STRICTLY FOR TELEGRAM (NO LATEX & NO MARKDOWN HEADERS):
-       - NEVER use Markdown headers (#, ##, ###, ####). Use standalone bold text **LIKE THIS**.
-       - NEVER use LaTeX syntax (do not use $, \\frac, or \\text). Write clean calculations like: "(1 / 1.50) + (1 / 3.00) = 0.6667 + 0.3333 = 1.0000".
-    4. STATUS BANNER CONSISTENCY RULE:
-       - If ANY match yields Profit Margin >= 30.00% (Implied Sum <= 0.7692), set top banner to:
-         "🚨 HIGH-PROFIT SUREBET FOUND (>= 30% ROI)"
-       - If a match is a surebet below 30% ROI, set top banner to:
-         "⚡ STANDARD ARBITRAGE DETECTED (< 30% ROI)"
-       - If no surebets are found, set top banner to:
-         "⚠️ WATCHLIST MODE: Monitoring live market variances"
+STRICT ARBITRAGE RULES:
+1. 2-Way Markets: (1/Odds1) + (1/Odds2) MUST be LESS THAN 1.00.
+2. 3-Way Markets: (1/Odds1) + (1/Odds2) + (1/Odds3) MUST be LESS THAN 1.00.
+3. Profit Margin % = ((1 / Sum of Implied Probabilities) - 1) * 100.
+4. Calculate stake distribution for a TOTAL BUDGET OF ₦10,000 NAIRA.
 
-    REQUIRED OUTPUT STRUCTURE:
+FORMAT OUTPUT EXACTLY AS:
 
-    🇳🇬 **Naija Sports Surebet Report**
+🔥 **HIGH-YIELD NAIJA SUREBET DETECTED**
+----------------------------------
+📌 **Event**: [Sport / League] — [Team A vs Team B]
+📅 **Kickoff Date & Time**: [Exact Date & Time, e.g., 17 Sep 2026, 4:00 PM]
+🎯 **Market**: [Over/Under / 1X2 / BTTS / Asian Handicap]
 
-    **STATUS**: [Insert exact matched status banner]
+📊 **VERIFIED ODDS & BOOKMAKERS**:
+- **Selection 1**: [Option 1] @ **[Odds]** on **[Bookmaker 1]**
+- **Selection 2**: [Option 2] @ **[Odds]** on **[Bookmaker 2]**
 
-    ---
+📈 **GUARANTEED PROFIT MARGIN**: **[X.XX]%**
 
-    **HIGH-PROFIT ARBITRAGE OPPORTUNITIES (>= 30% ROI)**
-    (List any fixtures meeting the 30% ROI target with match, market, bookies, exact odds, arithmetic check, and N10,000 stake breakdown for N13,000+ payout).
+💰 **STAKE ALLOCATION (₦10,000 BUDGET)**:
+- **Stake ₦[Amount]** on [Selection 1] @ [Bookmaker 1] ➔ Expected Return: ₦[Return]
+- **Stake ₦[Amount]** on [Selection 2] @ [Bookmaker 2] ➔ Expected Return: ₦[Return]
+- **Net Guaranteed Profit**: ₦[Profit]
 
-    ---
+----------------------------------
+If no 100% mathematically confirmed surebet exists in this current data cycle, provide a "Market Discrepancy Watchlist" across Bet9ja, SportyBet, BetKing, 1xBet, Betway, Betano, MSport, and 22Bet. EVERY watchlist item MUST also include the 📅 **Kickoff Date & Time**.
+"""
 
-    **MARKET DISCREPANCY WATCHLIST**
-    (List top 3 upcoming fixtures with market odds variances across bookies).
+send_telegram_alert("🇳🇬 *All-Bookmaker Engine ONLINE*\n\nScanning across Nigerian bookmakers with full Match Date & Kickoff Time tracking active.")
 
-    ---
+# ==========================================
+# 5. CONTINUOUS SCANNER LOOP
+# ==========================================
+SCAN_INTERVAL_SECONDS = 900  # 15 minutes
 
-    💡 **EXECUTION RULES FOR NIGERIAN TRADERS**
-    1. Always verify line consistency (e.g., Draw No Bet vs Double Chance) before placing bets across local and international-style bookies.
-    2. Account for withdrawal fees and settlement rules.
-    """
+while True:
+    print("\n🇳🇬 Gathering live sports data across all Nigerian bookmakers...", flush=True)
+    live_data = fetch_live_sports_data()
 
-    # Retry loop with exponential backoff for temporary 503 high-demand spikes
-    max_retries = 3
-    retry_delay = 10
-
-    for attempt in range(max_retries):
+    if client:
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
+            print(f"📡 Analyzing multi-bookmaker odds with Gemini ({MODEL_NAME})...", flush=True)
+            user_content = f"LIVE SEARCH DATA:\n{live_data}\n\n{SYSTEM_PROMPT}"
+            
             response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt
+                model=MODEL_NAME,
+                contents=user_content
             )
-            report = response.text.strip()
-            send_telegram_message(report)
-            break
-        except Exception as e:
-            logging.warning(f"Gemini API attempt {attempt + 1} failed: {e}")
-            if attempt < max_retries - 1:
-                logging.info(f"Retrying scan in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2
+
+            if response and hasattr(response, "text") and response.text:
+                print("💡 Analysis complete! Sending Telegram alert...", flush=True)
+                send_telegram_alert(f"⚽ *Naija Sports Surebet Alert*\n\n{response.text[:3500]}")
             else:
-                logging.error("All Gemini API retry attempts exhausted for this cycle.")
+                print("⚠️ Empty response from Gemini.", flush=True)
 
-
-def main():
-    # Start Keep-Alive Server on a separate thread
-    threading.Thread(target=start_health_server, daemon=True).start()
-
-    # Send initial online notification
-    send_telegram_message("🇳🇬 **All-Bookmaker Naija Engine ONLINE**\n\nScanning live fixtures with gemini-3.6-flash and 30% ROI target (N10,000 -> N13,000+ return).")
-
-    # Automated sleep cycle loop
-    while True:
-        try:
-            run_arbitrage_scan()
         except Exception as e:
-            logging.error(f"Unexpected error in main loop: {e}")
-        
-        logging.info(f"Sleeping for {SCAN_INTERVAL_SECONDS} seconds...")
-        time.sleep(SCAN_INTERVAL_SECONDS)
+            print(f"❌ Gemini Execution Error: {e}", flush=True)
 
-
-if __name__ == "__main__":
-    main()
+    print(f"⏳ Waiting {SCAN_INTERVAL_SECONDS // 60} minutes for next cycle...", flush=True)
+    time.sleep(SCAN_INTERVAL_SECONDS)
