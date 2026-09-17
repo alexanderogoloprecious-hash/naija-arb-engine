@@ -1,2 +1,3 @@
-google-genai requests
-ddgs
+google-genai
+requests
+duckduckgo-search
