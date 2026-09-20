@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
+from curl_cffi import requests as async_requests
 
 # ---------------------------------------------------------------------------
 # Logging Configuration
@@ -41,7 +42,7 @@ APPROVED_NAIJA_BOOKIES = {
 }
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -89,17 +90,14 @@ def get_naija_bookie_name(raw_title: str):
     return None
 
 def format_match_date(date_val) -> str:
-    """Formats various timestamp formats into 'DD MMM YYYY, HH:MM'"""
     if not date_val:
         return "N/A"
     try:
         if isinstance(date_val, (int, float)):
-            # Convert millisecond timestamp to seconds if needed
             ts = date_val / 1000.0 if date_val > 1e11 else date_val
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             return dt.strftime("%d %b %Y, %H:%M UTC")
         elif isinstance(date_val, str):
-            # Parse ISO 8601 strings (e.g., 2026-09-21T18:00:00Z)
             clean_str = date_val.replace("Z", "+00:00")
             dt = datetime.fromisoformat(clean_str)
             return dt.strftime("%d %b %Y, %H:%M UTC")
@@ -108,15 +106,21 @@ def format_match_date(date_val) -> str:
     return str(date_val)
 
 # ---------------------------------------------------------------------------
-# Direct Nigerian Scrapers
+# Direct Nigerian Scrapers (Powered by curl_cffi for Cloudflare Bypass)
 # ---------------------------------------------------------------------------
 def fetch_sportybet():
     url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
     params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": 50}
-    headers = {**DEFAULT_HEADERS, "Referer": "https://www.sportybet.com/ng/"}
     matches = []
     try:
-        res = requests.get(url, params=params, headers=headers, proxies=PROXIES, timeout=8)
+        res = async_requests.get(
+            url, 
+            params=params, 
+            headers={**DEFAULT_HEADERS, "Referer": "https://www.sportybet.com/ng/"}, 
+            proxies=PROXIES, 
+            impersonate="chrome", 
+            timeout=10
+        )
         if res.status_code == 200:
             for tourney in res.json().get("data", {}).get("tournaments", []):
                 for ev in tourney.get("events", []):
@@ -144,10 +148,16 @@ def fetch_sportybet():
 def fetch_bet9ja():
     url = "https://sports.bet9ja.com/desktop/feapi/Palimpsest/GetPrematchEvents"
     params = {"sportId": 1, "dayOffset": 0, "pageSize": 50}
-    headers = {**DEFAULT_HEADERS, "Referer": "https://sports.bet9ja.com/"}
     matches = []
     try:
-        res = requests.get(url, params=params, headers=headers, proxies=PROXIES, timeout=8)
+        res = async_requests.get(
+            url, 
+            params=params, 
+            headers={**DEFAULT_HEADERS, "Referer": "https://sports.bet9ja.com/"}, 
+            proxies=PROXIES, 
+            impersonate="chrome", 
+            timeout=10
+        )
         if res.status_code == 200:
             for ev in res.json().get("data", {}).get("events", []):
                 home, away = ev.get("home_team"), ev.get("away_team")
@@ -173,10 +183,16 @@ def fetch_bet9ja():
 def fetch_betking():
     url = "https://m.betking.com/api/sports/events/prematch"
     params = {"sportId": 1, "pageSize": 50}
-    headers = {**DEFAULT_HEADERS, "Referer": "https://m.betking.com/"}
     matches = []
     try:
-        res = requests.get(url, params=params, headers=headers, proxies=PROXIES, timeout=8)
+        res = async_requests.get(
+            url, 
+            params=params, 
+            headers={**DEFAULT_HEADERS, "Referer": "https://m.betking.com/"}, 
+            proxies=PROXIES, 
+            impersonate="chrome", 
+            timeout=10
+        )
         if res.status_code == 200:
             for ev in res.json().get("data", []):
                 home, away = ev.get("homeTeam"), ev.get("awayTeam")
@@ -203,10 +219,16 @@ def fetch_betking():
 def fetch_msport():
     url = "https://www.msport.com/api/ng/factsCenter/upcomingEvents"
     params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": 50}
-    headers = {**DEFAULT_HEADERS, "Referer": "https://www.msport.com/ng/"}
     matches = []
     try:
-        res = requests.get(url, params=params, headers=headers, proxies=PROXIES, timeout=8)
+        res = async_requests.get(
+            url, 
+            params=params, 
+            headers={**DEFAULT_HEADERS, "Referer": "https://www.msport.com/ng/"}, 
+            proxies=PROXIES, 
+            impersonate="chrome", 
+            timeout=10
+        )
         if res.status_code == 200:
             for tourney in res.json().get("data", {}).get("tournaments", []):
                 for ev in tourney.get("events", []):
@@ -391,7 +413,7 @@ def run_engine():
 
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
-    logging.info("Naija Arb Engine Online (Strictly Nigerian Bookies Mode with Dates).")
+    logging.info("Naija Arb Engine Online (Strictly Nigerian Bookies Mode with Impersonation & Dates).")
     
     while True:
         try:
