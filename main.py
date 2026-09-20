@@ -4,7 +4,7 @@ import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from google import genai
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PORT = int(os.getenv("PORT", 10000))
 
 # ---------------------------------------------------------------------------
-# Keep-Alive Server (Render & UptimeRobot Compliant)
+# Health Check Server
 # ---------------------------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -49,7 +49,7 @@ def start_health_server():
     httpd.serve_forever()
 
 # ---------------------------------------------------------------------------
-# Telegram Alert Dispatcher
+# Telegram Dispatcher
 # ---------------------------------------------------------------------------
 def send_telegram_alert(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -70,7 +70,6 @@ def send_telegram_alert(message: str) -> bool:
             logging.info("Telegram alert delivered successfully.")
             return True
         else:
-            # Plain text fallback if markdown formatting fails
             payload.pop("parse_mode", None)
             requests.post(url, json=payload, timeout=15)
             logging.info("Telegram alert sent via plain text fallback.")
@@ -80,10 +79,9 @@ def send_telegram_alert(message: str) -> bool:
         return False
 
 # ---------------------------------------------------------------------------
-# Free Web Search Context (No Gemini Search Tool Quota Used)
+# Search Context Fetcher
 # ---------------------------------------------------------------------------
 def fetch_live_market_snippets():
-    """Fetches live search context for free via DuckDuckGo."""
     query = "Nigerian bookmakers odds Bet9ja SportyBet 1xBet BetKing Betway Betano MSport live football matches today"
     try:
         logging.info("Fetching live odds snippets via DuckDuckGo...")
@@ -98,7 +96,7 @@ def fetch_live_market_snippets():
     return "Standard odds monitoring active across Nigerian bookmakers."
 
 # ---------------------------------------------------------------------------
-# Gemini Arbitrage Scanning Engine
+# Gemini Scanner Engine with 503 Retry & Model Fallback
 # ---------------------------------------------------------------------------
 def run_arbitrage_scan():
     if not GEMINI_API_KEY:
@@ -129,35 +127,45 @@ def run_arbitrage_scan():
     - End with **EXECUTION RULES FOR NIGERIAN TRADERS**.
     """
 
-    try:
-        logging.info("Running Gemini 3.6 Flash analysis...")
-        # Pure text generation without tool calls fits within standard free tier quotas
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt
-        )
+    # Models list to handle high demand / 503 server spikes
+    candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash"]
 
-        if response.text and response.text.strip():
-            report = response.text.strip()
-            send_telegram_alert(report)
-        else:
-            logging.warning("Gemini API returned an empty response.")
+    for model_name in candidate_models:
+        for attempt in range(1, 3):
+            try:
+                logging.info(f"Running Gemini ({model_name}) analysis (Attempt {attempt})...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
 
-    except Exception as e:
-        logging.error(f"Gemini API execution error: {e}")
+                if response.text and response.text.strip():
+                    send_telegram_alert(response.text.strip())
+                    return
+                else:
+                    logging.warning("Gemini API returned an empty response.")
+                    return
+
+            except Exception as e:
+                error_str = str(e)
+                if "503" in error_str or "UNAVAILABLE" in error_str:
+                    logging.warning(f"Model {model_name} overloaded (503). Waiting 10s...")
+                    time.sleep(10)
+                else:
+                    logging.error(f"Error with {model_name}: {e}")
+                    break
+
+    logging.error("All Gemini model candidates are currently experiencing server load. Will retry on next cycle.")
 
 # ---------------------------------------------------------------------------
-# Main Program Loop
+# Main Loop
 # ---------------------------------------------------------------------------
 def main():
-    # Start KeepAlive server in background thread
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    # System Startup Alert
     logging.info("Naija Arb Engine started successfully.")
     send_telegram_alert("⚡ **Naija Arb Engine** online and monitoring live odds.")
 
-    # Automated 15-minute scan cycle
     while True:
         try:
             run_arbitrage_scan()
