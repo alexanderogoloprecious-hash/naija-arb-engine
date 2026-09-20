@@ -7,54 +7,54 @@ import requests
 from ddgs import DDGS
 from google import genai
 
+# ---------------------------------------------------------------------------
 # Logging Configuration
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-# Environment Variables
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Supports multiple comma-separated keys for automatic failover: "KEY1,KEY2"
+GEMINI_API_KEYS_RAW = os.getenv("GEMINI_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
 
 
+# ---------------------------------------------------------------------------
+# Health Check Server
+# ---------------------------------------------------------------------------
 class KeepAliveServer(BaseHTTPRequestHandler):
-    """HTTP Server to prevent Render web service sleep and respond to UptimeRobot pings."""
-    
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Naija Arb Engine is active and operational.")
+        self.wfile.write(b"Naija Arb Engine is active.")
 
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
 
-    def do_POST(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
     def log_message(self, format, *args):
-        return  # Suppress HTTP access logging
+        return
 
 
 def start_health_server():
     server = HTTPServer(("0.0.0.0", PORT), KeepAliveServer)
-    logging.info(f"Keep-alive HTTP server listening on port {PORT}...")
+    logging.info(f"Keep-alive HTTP server running on port {PORT}...")
     server.serve_forever()
 
 
+# ---------------------------------------------------------------------------
+# Telegram Dispatcher
+# ---------------------------------------------------------------------------
 def send_telegram_alert(text: str) -> bool:
-    """Delivers structured updates to Telegram with plain-text fallback."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variable is missing.")
+        logging.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -68,26 +68,26 @@ def send_telegram_alert(text: str) -> bool:
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
-            logging.info("Telegram notification sent successfully.")
+            logging.info("Telegram alert sent successfully.")
             return True
         else:
-            # Fallback to plain text if Markdown syntax error occurs
             payload.pop("parse_mode", None)
             requests.post(url, json=payload, timeout=15)
-            logging.info("Telegram notification sent via plain text fallback.")
+            logging.info("Telegram alert delivered via plain text fallback.")
             return True
     except Exception as e:
-        logging.error(f"Failed to deliver Telegram notification: {e}")
+        logging.error(f"Telegram notification error: {e}")
         return False
 
 
+# ---------------------------------------------------------------------------
+# Market Context Fetcher
+# ---------------------------------------------------------------------------
 def fetch_live_odds_context() -> str:
-    """Retrieves live odds data using The Odds API or DuckDuckGo web search fallback."""
     if ODDS_API_KEY:
         logging.info("Fetching structured odds via The Odds API...")
         sports = ["soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league"]
         summary = []
-
         for sport in sports:
             url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
             params = {
@@ -111,12 +111,12 @@ def fetch_live_odds_context() -> str:
                         if lines:
                             summary.append(f"Match: {home} vs {away} (Start: {start})\n" + "\n".join(lines[:4]))
             except Exception as e:
-                logging.warning(f"Error fetching odds for {sport}: {e}")
+                logging.warning(f"The Odds API error for {sport}: {e}")
 
         if summary:
             return "\n\n".join(summary)
 
-    logging.info("Fetching market context via DuckDuckGo...")
+    logging.info("Fetching context via DuckDuckGo fallback...")
     query = "Nigerian bookmakers odds Bet9ja SportyBet 1xBet BetKing Betway Betano MSport live football matches today"
     try:
         with DDGS() as ddgs:
@@ -125,18 +125,20 @@ def fetch_live_odds_context() -> str:
             if snippets:
                 return "\n".join(snippets)
     except Exception as e:
-        logging.warning(f"DuckDuckGo search warning: {e}")
+        logging.warning(f"DuckDuckGo search error: {e}")
 
     return "Standard odds monitoring active across Nigerian bookmakers."
 
 
+# ---------------------------------------------------------------------------
+# Dynamic Model Discovery & Execution
+# ---------------------------------------------------------------------------
 def run_arbitrage_scan():
-    """Executes a market scan with fallback model routing to avoid rate limits."""
-    if not GEMINI_API_KEY:
-        logging.error("GEMINI_API_KEY is not set.")
+    api_keys = [k.strip() for k in GEMINI_API_KEYS_RAW.split(",") if k.strip()]
+    if not api_keys:
+        logging.error("No valid GEMINI_API_KEY configured.")
         return
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
     odds_context = fetch_live_odds_context()
 
     prompt = f"""
@@ -155,7 +157,7 @@ def run_arbitrage_scan():
        - Stake 2 = N10,000 / (Implied Sum * Odds_2)
     3. FORMATTING (NO LATEX & NO MARKDOWN HEADERS):
        - DO NOT use Markdown headers (#, ##, ###). Use standalone bold line tags **LIKE THIS**.
-       - DO NOT use LaTeX syntax (no $, \\frac, or \\text). Write clean expressions like: "(1 / 1.50) + (1 / 3.00) = 0.6667 + 0.3333 = 1.0000".
+       - DO NOT use LaTeX syntax. Write standard math like: "(1 / 1.50) + (1 / 3.00) = 0.6667 + 0.3333 = 1.0000".
     4. STATUS BANNER RULE:
        - If any match yields Profit Margin >= 30.00% (Implied Sum <= 0.7692): set banner to "🚨 HIGH-PROFIT SUREBET FOUND (>= 30% ROI)"
        - If a surebet is found below 30% ROI: set banner to "⚡ STANDARD ARBITRAGE DETECTED (< 30% ROI)"
@@ -184,52 +186,61 @@ def run_arbitrage_scan():
     2. Factor in withdrawal fees and settlement delays.
     """
 
-    # High-capacity production models first (1,500 daily requests on free tier)
-    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash-lite", "gemini-3.6-flash"]
+    for key_idx, key in enumerate(api_keys):
+        client = genai.Client(api_key=key)
 
-    for model_name in candidate_models:
+        # Discover active models available on this API key dynamically
+        active_models = []
         try:
-            logging.info(f"Running scan with {model_name}...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-
-            if response.text and response.text.strip():
-                send_telegram_alert(response.text.strip())
-                return
-            else:
-                logging.warning(f"Model {model_name} returned empty text. Trying next model...")
-
+            for m in client.models.list():
+                model_id = m.name.replace("models/", "") if hasattr(m, "name") else str(m)
+                if "flash" in model_id.lower() or "pro" in model_id.lower():
+                    active_models.append(model_id)
         except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                logging.warning(f"Quota limit reached for {model_name} (429). Skipping to next model...")
-            elif "503" in err_msg or "UNAVAILABLE" in err_msg:
-                logging.warning(f"Model {model_name} overloaded (503). Skipping to next model...")
-            elif "404" in err_msg or "NOT_FOUND" in err_msg:
-                logging.warning(f"Model {model_name} unavailable (404). Skipping...")
-            else:
-                logging.error(f"Error executing {model_name}: {e}")
+            logging.warning(f"Could not fetch model list dynamically for Key {key_idx+1}: {e}")
+            active_models = ["gemini-3.6-flash"]
 
-    logging.error("All candidate models failed or hit daily quota limits. Skipping cycle.")
+        # Prioritize 3.6/3.5 models
+        active_models.sort(key=lambda x: ("3.6" in x or "3.5" in x), reverse=True)
+
+        for model_name in active_models:
+            try:
+                logging.info(f"Scanning with {model_name} (API Key {key_idx+1})...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+
+                if response.text and response.text.strip():
+                    send_telegram_alert(response.text.strip())
+                    return
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    logging.warning(f"Quota limit reached for {model_name} on Key {key_idx+1} (429). Trying next...")
+                elif "404" in err_str or "NOT_FOUND" in err_str:
+                    logging.warning(f"Model {model_name} unavailable (404). Skipping...")
+                else:
+                    logging.error(f"Execution error on {model_name}: {e}")
+
+    logging.error("All Gemini API keys and active models exhausted for this cycle.")
 
 
+# ---------------------------------------------------------------------------
+# Main Execution Loop
+# ---------------------------------------------------------------------------
 def main():
-    # Start Keep-Alive HTTP server on background thread
     threading.Thread(target=start_health_server, daemon=True).start()
+    logging.info("Naija Arb Engine started.")
+    send_telegram_alert("🇳🇬 **Naija Arb Engine Online**\n\nAutomated scanning active across Nigerian operators.")
 
-    logging.info("Naija Arb Engine initialized.")
-    send_telegram_alert("🇳🇬 **Naija Arb Engine Online**\n\nAutomated scanning active every 15 minutes across Nigerian operators.")
-
-    # Main 15-minute execution loop
     while True:
         try:
             run_arbitrage_scan()
         except Exception as e:
-            logging.error(f"Unexpected error in execution loop: {e}")
+            logging.error(f"Unexpected loop exception: {e}")
 
-        logging.info("Cycle finished. Sleeping for 15 minutes...")
+        logging.info("Cycle complete. Sleeping for 15 minutes...")
         time.sleep(900)
 
 
