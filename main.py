@@ -143,18 +143,26 @@ def fetch_and_detect_real_arbs():
     return verified_arbs, "\n".join(raw_summary[:10])
 
 # ---------------------------------------------------------------------------
-# Zero-Hallucination Gemini Scan Loop with Fallbacks & Exponential Backoff
+# Zero-Hallucination & Quota-Protected Gemini Scan Loop
 # ---------------------------------------------------------------------------
 def run_arbitrage_scan():
-    api_keys = [k.strip() for k in GEMINI_API_KEYS_RAW.split(",") if k.strip()]
-    if not api_keys:
-        logging.error("No valid GEMINI_API_KEY found.")
-        return
-
     now_utc = datetime.now(timezone.utc)
     today_formatted = now_utc.strftime("%A, %B %d, %Y")
 
     verified_arbs, raw_market_data = fetch_and_detect_real_arbs()
+
+    # CRITICAL QUOTA GUARD: If no arbs exist, send alert directly from Python.
+    # Do NOT call Gemini API when there are 0 arbs to conserve daily quota.
+    if not verified_arbs:
+        logging.info("No arbitrage opportunities found by Python. Skipping Gemini API call to preserve quota.")
+        watchlist_msg = "⚠️ *WATCHLIST MODE*: No mathematically valid arbitrage opportunities found across live bookmakers right now. Scanning again in 30 minutes."
+        send_telegram_alert(watchlist_msg)
+        return
+
+    api_keys = [k.strip() for k in GEMINI_API_KEYS_RAW.split(",") if k.strip()]
+    if not api_keys:
+        logging.error("No valid GEMINI_API_KEY found.")
+        return
 
     prompt = f"""
     You are 'Naija Arb Scanner'.
@@ -169,24 +177,21 @@ def run_arbitrage_scan():
 
     STRICT OPERATIONAL RULES:
     1. ZERO HALLUCINATION PERMITTED: DO NOT invent matches, scores, team names, bookmaker names, or odds numbers under any circumstances.
-    2. ONLY use the exact teams and odds provided in the VERIFIED DATA feed above.
-    3. IF 'VERIFIED PYTHON-CALCULATED ARBITRAGE MATCHES' is empty ([]), output:
-       "⚠️ WATCHLIST MODE: No mathematically valid arbitrage opportunities found across live bookmakers right now. Scanning again in 30 minutes."
-    4. DO NOT use LaTeX syntax ($ or \\frac).
-    5. Format the final output clearly for Telegram using bold header lines.
+    2. ONLY format the exact teams and odds provided in the VERIFIED DATA feed above.
+    3. DO NOT use LaTeX syntax ($ or \\frac).
+    4. Format the final output clearly for Telegram using bold header lines.
     """
 
-    # Model endpoints updated to active, supported versions
-    valid_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite"]
+    # Model endpoints list with robust active fallbacks
+    valid_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
     for key in api_keys:
         client = genai.Client(api_key=key)
 
         for model_name in valid_models:
-            # Try up to 3 retries per model to handle temporary 503 high-demand spikes
-            for attempt in range(1, 4):
+            for attempt in range(1, 3):
                 try:
-                    logging.info(f"Generating alert using {model_name} (Attempt {attempt})...")
+                    logging.info(f"Formatting real arbitrage alert using {model_name} (Attempt {attempt})...")
                     response = client.models.generate_content(
                         model=model_name,
                         contents=prompt
@@ -199,23 +204,23 @@ def run_arbitrage_scan():
                     err_msg = str(e)
                     logging.warning(f"Error on {model_name} (Attempt {attempt}): {err_msg}")
                     
-                    if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg.lower():
-                        time.sleep(3 * attempt)  # Exponential pause before retry
-                        continue
-                    elif "404" in err_msg or "NOT_FOUND" in err_msg:
-                        logging.warning(f"Model {model_name} endpoint missing/deprecated. Skipping...")
-                        break  # Instantly skip to the next model in valid_models
+                    if "404" in err_msg or "NOT_FOUND" in err_msg:
+                        logging.warning(f"Model {model_name} not available. Skipping immediately...")
+                        break  # Immediately skip deprecated models
+                    elif "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        logging.info("Rate limit or service busy hit. Waiting 25 seconds for quota window reset...")
+                        time.sleep(25)  # Pause to clear Google's 22s retry window
                     else:
-                        time.sleep(2)
+                        time.sleep(3)
 
     logging.error("All model execution attempts failed.")
 
 # ---------------------------------------------------------------------------
-# Main Loop
+# Main Execution Loop
 # ---------------------------------------------------------------------------
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
-    logging.info("Naija Arb Engine started with Zero-Hallucination and Fault-Tolerance protection.")
+    logging.info("Naija Arb Engine started with Zero-Hallucination and Quota-Protection safeguards.")
 
     while True:
         try:
