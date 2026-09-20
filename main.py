@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import threading
@@ -6,15 +7,10 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
-try:
-    from duckduckgo_search import DDGS
-except ImportError:
-    from ddgs import DDGS
-
 from google import genai
 
 # ---------------------------------------------------------------------------
-# Configuration & Environment Variables
+# Environment Configuration
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -27,10 +23,17 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEYS_RAW = os.getenv("GEMINI_API_KEY", "")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 1800))
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 300))  # Default 5 minutes
+DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", 100000))        # Default ₦100,000
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 # ---------------------------------------------------------------------------
-# Keep-Alive HTTP Health Check Server
+# Web Server for Render Health Checks
 # ---------------------------------------------------------------------------
 class KeepAliveServer(BaseHTTPRequestHandler):
     def _send_response(self, text="OK"):
@@ -40,7 +43,7 @@ class KeepAliveServer(BaseHTTPRequestHandler):
         self.wfile.write(text.encode("utf-8"))
 
     def do_GET(self):
-        self._send_response("Naija Arb Engine is ONLINE.")
+        self._send_response("Naija Arb Engine v4.0 is ONLINE.")
 
     def do_HEAD(self):
         self._send_response()
@@ -53,7 +56,7 @@ class KeepAliveServer(BaseHTTPRequestHandler):
 
 def start_health_server():
     server = HTTPServer(("0.0.0.0", PORT), KeepAliveServer)
-    logging.info(f"Health check server listening on port {PORT}...")
+    logging.info(f"Health check server running on port {PORT}...")
     server.serve_forever()
 
 # ---------------------------------------------------------------------------
@@ -77,156 +80,240 @@ def send_telegram_alert(text: str) -> bool:
         if res.status_code != 200:
             payload.pop("parse_mode", None)
             requests.post(url, json=payload, timeout=15)
-        logging.info("Telegram alert delivered successfully.")
+        logging.info("Telegram notification sent successfully.")
         return True
     except Exception as e:
         logging.error(f"Failed to send Telegram message: {e}")
         return False
 
 # ---------------------------------------------------------------------------
-# Deterministic Python Arbitrage Scanner
+# Team Name Normalizer for Cross-Bookie Matching
 # ---------------------------------------------------------------------------
-def fetch_and_detect_real_arbs():
-    """Fetches real odds via API and calculates math in Python to prevent hallucinated arbs."""
-    if not ODDS_API_KEY:
-        logging.warning("ODDS_API_KEY missing. Cannot fetch structured odds.")
-        return [], "No Odds API key configured."
+def normalize_name(name: str) -> str:
+    """Standardizes team names so 'Chelsea FC' matches 'Chelsea' across bookies."""
+    name = name.lower()
+    for word in [" fc", "fc ", " cf", "cf ", " united", " utd", " town", " city"]:
+        name = name.replace(word, "")
+    return re.sub(r'[^a-z0-9]', '', name)
 
-    sports = ["soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league"]
+# ---------------------------------------------------------------------------
+# Direct Bookmaker Scrapers
+# ---------------------------------------------------------------------------
+def fetch_sportybet_odds():
+    """Direct JSON API Scraper for SportyBet Nigeria."""
+    url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
+    params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": 40}
+    headers = {**DEFAULT_HEADERS, "Referer": "https://www.sportybet.com/ng/"}
+
+    matches = []
+    try:
+        res = requests.get(url, params=params, headers=headers, timeout=10)
+        if res.status_code == 200:
+            tournaments = res.json().get("data", {}).get("tournaments", [])
+            for tourney in tournaments:
+                for event in tourney.get("events", []):
+                    home = event.get("homeTeamName")
+                    away = event.get("awayTeamName")
+                    if not home or not away:
+                        continue
+
+                    odds = {}
+                    for market in event.get("markets", []):
+                        if market.get("id") == "1":
+                            for outcome in market.get("outcomes", []):
+                                desc = outcome.get("desc")
+                                price = float(outcome.get("odds", 0))
+                                if desc == "1": odds["Home"] = price
+                                elif desc == "X": odds["Draw"] = price
+                                elif desc == "2": odds["Away"] = price
+
+                    if len(odds) == 3:
+                        matches.append({
+                            "bookmaker": "SportyBet",
+                            "home": home,
+                            "away": away,
+                            "norm_key": f"{normalize_name(home)}_{normalize_name(away)}",
+                            "odds": odds
+                        })
+            logging.info(f"[SportyBet] Fetched {len(matches)} matches.")
+    except Exception as e:
+        logging.error(f"[SportyBet Scraper Error]: {e}")
+    return matches
+
+def fetch_bet9ja_odds():
+    """Direct JSON API Scraper for Bet9ja Nigeria."""
+    url = "https://sports.bet9ja.com/desktop/feapi/Palimpsest/GetPrematchEvents"
+    params = {"sportId": 1, "dayOffset": 0, "pageSize": 40}
+    headers = {**DEFAULT_HEADERS, "Referer": "https://sports.bet9ja.com/"}
+
+    matches = []
+    try:
+        res = requests.get(url, params=params, headers=headers, timeout=10)
+        if res.status_code == 200:
+            events = res.json().get("data", {}).get("events", [])
+            for event in events:
+                home = event.get("home_team")
+                away = event.get("away_team")
+                if not home or not away:
+                    continue
+
+                raw_odds = event.get("odds", {})
+                odds = {
+                    "Home": float(raw_odds.get("1", 0)),
+                    "Draw": float(raw_odds.get("X", 0)),
+                    "Away": float(raw_odds.get("2", 0))
+                }
+
+                if all(v > 1.0 for v in odds.values()):
+                    matches.append({
+                        "bookmaker": "Bet9ja",
+                        "home": home,
+                        "away": away,
+                        "norm_key": f"{normalize_name(home)}_{normalize_name(away)}",
+                        "odds": odds
+                    })
+            logging.info(f"[Bet9ja] Fetched {len(matches)} matches.")
+    except Exception as e:
+        logging.error(f"[Bet9ja Scraper Error]: {e}")
+    return matches
+
+# ---------------------------------------------------------------------------
+# Cross-Bookmaker Arbitrage Calculation Engine
+# ---------------------------------------------------------------------------
+def calculate_arbitrage():
+    sportybet_matches = fetch_sportybet_odds()
+    bet9ja_matches = fetch_bet9ja_odds()
+
+    # Aggregate odds across platforms
+    aggregated = {}
+
+    def ingest(matches_list):
+        for m in matches_list:
+            key = m["norm_key"]
+            if key not in aggregated:
+                aggregated[key] = {
+                    "display_fixture": f"{m['home']} vs {m['away']}",
+                    "outcomes": {"Home": [], "Draw": [], "Away": []}
+                }
+            for outcome_type, price in m["odds"].items():
+                if price > 1.0:
+                    aggregated[key]["outcomes"][outcome_type].append({
+                        "bookmaker": m["bookmaker"],
+                        "price": price
+                    })
+
+    ingest(sportybet_matches)
+    ingest(bet9ja_matches)
+
     verified_arbs = []
-    raw_summary = []
 
-    for sport in sports:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
-        params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": "eu,uk",
-            "markets": "h2h,totals",
-            "oddsFormat": "decimal"
-        }
-        try:
-            res = requests.get(url, params=params, timeout=10)
-            if res.status_code == 200:
-                matches = res.json()
-                for match in matches:
-                    home = match.get("home_team")
-                    away = match.get("away_team")
-                    commence = match.get("commence_time")
+    for key, data in aggregated.items():
+        outcomes = data["outcomes"]
+        if outcomes["Home"] and outcomes["Draw"] and outcomes["Away"]:
+            best_home = max(outcomes["Home"], key=lambda x: x["price"])
+            best_draw = max(outcomes["Draw"], key=lambda x: x["price"])
+            best_away = max(outcomes["Away"], key=lambda x: x["price"])
 
-                    best_h2h = {}
-                    for b in match.get("bookmakers", []):
-                        bookie_name = b.get("title")
-                        for m in b.get("markets", []):
-                            if m.get("key") == "h2h":
-                                for outcome in m.get("outcomes", []):
-                                    name = outcome.get("name")
-                                    price = outcome.get("price", 0)
-                                    if name not in best_h2h or price > best_h2h[name]["price"]:
-                                        best_h2h[name] = {"price": price, "bookie": bookie_name}
+            implied_sum = (1.0 / best_home["price"]) + (1.0 / best_draw["price"]) + (1.0 / best_away["price"])
 
-                    if len(best_h2h) >= 2:
-                        implied_sum = sum(1.0 / item["price"] for item in best_h2h.values() if item["price"] > 0)
-                        if implied_sum < 1.0:  # Valid Arbitrage Detected
-                            roi = ((1.0 / implied_sum) - 1.0) * 100
-                            verified_arbs.append({
-                                "fixture": f"{home} vs {away}",
-                                "commence": commence,
-                                "implied_sum": round(implied_sum, 4),
-                                "roi": round(roi, 2),
-                                "odds": best_h2h
-                            })
-                    
-                    raw_summary.append(f"{home} vs {away} | Odds: {best_h2h}")
-        except Exception as e:
-            logging.error(f"Error fetching odds for {sport}: {e}")
+            # Arbitrage Condition: Implied Probability Sum < 1.0
+            if implied_sum < 1.0:
+                roi = ((1.0 / implied_sum) - 1.0) * 100
+                total_payout = DEFAULT_BANKROLL / implied_sum
+                net_profit = total_payout - DEFAULT_BANKROLL
 
-    return verified_arbs, "\n".join(raw_summary[:10])
+                # Calculate Exact Stake Breakdown
+                stake_home = round((DEFAULT_BANKROLL / (best_home["price"] * implied_sum)), 2)
+                stake_draw = round((DEFAULT_BANKROLL / (best_draw["price"] * implied_sum)), 2)
+                stake_away = round((DEFAULT_BANKROLL / (best_away["price"] * implied_sum)), 2)
+
+                verified_arbs.append({
+                    "fixture": data["display_fixture"],
+                    "roi": round(roi, 2),
+                    "bankroll": DEFAULT_BANKROLL,
+                    "net_profit": round(net_profit, 2),
+                    "best_outcomes": {
+                        "Home": {**best_home, "stake": stake_home},
+                        "Draw": {**best_draw, "stake": stake_draw},
+                        "Away": {**best_away, "stake": stake_away}
+                    }
+                })
+
+    return verified_arbs
 
 # ---------------------------------------------------------------------------
-# Zero-Hallucination & Quota-Protected Gemini Scan Loop
+# Formatting & Execution Loop
 # ---------------------------------------------------------------------------
-def run_arbitrage_scan():
-    now_utc = datetime.now(timezone.utc)
-    today_formatted = now_utc.strftime("%A, %B %d, %Y")
+def format_arb_telegram_message(arb):
+    """Fallback Python Telegram formatter if Gemini is resting or out of quota."""
+    msg = f"🚨 *ARBITRAGE OPPORTUNITY FOUND* 🚨\n\n"
+    msg += f"⚽ *Match*: {arb['fixture']}\n"
+    msg += f"📈 *ROI*: *+{arb['roi']}%*\n"
+    msg += f"💰 *Bankroll*: ₦{arb['bankroll']:,.2f}\n"
+    msg += f"💵 *Expected Net Profit*: *₦{arb['net_profit']:,.2f}*\n\n"
+    msg += f"*STAKE BREAKDOWN*:\n"
+    
+    for outcome, data in arb['best_outcomes'].items():
+        msg += f"• *{outcome}* @ *{data['price']}* ({data['bookmaker']}) ➔ Stake: *₦{data['stake']:,.2f}*\n"
+    
+    return msg
 
-    verified_arbs, raw_market_data = fetch_and_detect_real_arbs()
+def run_scan():
+    logging.info("Starting combined market scan...")
+    arbs = calculate_arbitrage()
 
-    # CRITICAL QUOTA GUARD: If no arbs exist, send alert directly from Python.
-    # Do NOT call Gemini API when there are 0 arbs to conserve daily quota.
-    if not verified_arbs:
-        logging.info("No arbitrage opportunities found by Python. Skipping Gemini API call to preserve quota.")
-        watchlist_msg = "⚠️ *WATCHLIST MODE*: No mathematically valid arbitrage opportunities found across live bookmakers right now. Scanning again in 30 minutes."
-        send_telegram_alert(watchlist_msg)
+    # QUOTA PROTECTION: If no arbs found, alert via Telegram directly. Do NOT call Gemini API.
+    if not arbs:
+        logging.info("No arbitrage opportunities found. Skipping Gemini API call to preserve quota.")
+        send_telegram_alert("⚠️ *WATCHLIST MODE*: Scanned SportyBet and Bet9ja. No cross-market arbitrage found. Rescanning shortly.")
         return
 
-    api_keys = [k.strip() for k in GEMINI_API_KEYS_RAW.split(",") if k.strip()]
-    if not api_keys:
-        logging.error("No valid GEMINI_API_KEY found.")
-        return
+    # If arbs exist, process them
+    for arb in arbs:
+        python_formatted_msg = format_arb_telegram_message(arb)
+        api_keys = [k.strip() for k in GEMINI_API_KEYS_RAW.split(",") if k.strip()]
 
-    prompt = f"""
-    You are 'Naija Arb Scanner'.
+        if not api_keys:
+            send_telegram_alert(python_formatted_msg)
+            continue
 
-    SYSTEM DATE: {today_formatted}
+        # Try polishing message via Gemini API
+        gemini_success = False
+        valid_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.0-flash"]
+        
+        prompt = f"Reformat this arbitrage alert clearly for Telegram without changing any numbers:\n\n{python_formatted_msg}"
 
-    VERIFIED PYTHON-CALCULATED ARBITRAGE MATCHES:
-    {verified_arbs}
+        for key in api_keys:
+            if gemini_success: break
+            client = genai.Client(api_key=key)
 
-    RAW LIVE MARKET DATA FEED:
-    {raw_market_data}
-
-    STRICT OPERATIONAL RULES:
-    1. ZERO HALLUCINATION PERMITTED: DO NOT invent matches, scores, team names, bookmaker names, or odds numbers under any circumstances.
-    2. ONLY format the exact teams and odds provided in the VERIFIED DATA feed above.
-    3. DO NOT use LaTeX syntax ($ or \\frac).
-    4. Format the final output clearly for Telegram using bold header lines.
-    """
-
-    # Model endpoints list with robust active fallbacks
-    valid_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-
-    for key in api_keys:
-        client = genai.Client(api_key=key)
-
-        for model_name in valid_models:
-            for attempt in range(1, 3):
+            for model_name in valid_models:
                 try:
-                    logging.info(f"Formatting real arbitrage alert using {model_name} (Attempt {attempt})...")
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt
-                    )
-
+                    response = client.models.generate_content(model=model_name, contents=prompt)
                     if response.text and response.text.strip():
                         send_telegram_alert(response.text.strip())
-                        return
+                        gemini_success = True
+                        break
                 except Exception as e:
-                    err_msg = str(e)
-                    logging.warning(f"Error on {model_name} (Attempt {attempt}): {err_msg}")
-                    
-                    if "404" in err_msg or "NOT_FOUND" in err_msg:
-                        logging.warning(f"Model {model_name} not available. Skipping immediately...")
-                        break  # Immediately skip deprecated models
-                    elif "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                        logging.info("Rate limit or service busy hit. Waiting 25 seconds for quota window reset...")
-                        time.sleep(25)  # Pause to clear Google's 22s retry window
-                    else:
-                        time.sleep(3)
+                    logging.warning(f"Gemini formatting failed on {model_name}: {e}")
+                    time.sleep(2)
 
-    logging.error("All model execution attempts failed.")
+        # Fallback to pure Python message if Gemini API failed or was rate-limited
+        if not gemini_success:
+            send_telegram_alert(python_formatted_msg)
 
 # ---------------------------------------------------------------------------
 # Main Execution Loop
 # ---------------------------------------------------------------------------
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
-    logging.info("Naija Arb Engine started with Zero-Hallucination and Quota-Protection safeguards.")
+    logging.info("Naija Arb Engine v4.0 Started.")
 
     while True:
         try:
-            run_arbitrage_scan()
+            run_scan()
         except Exception as e:
-            logging.error(f"Unexpected exception in main loop: {e}")
+            logging.error(f"Unexpected error in main loop: {e}")
 
         logging.info(f"Sleeping for {SCAN_INTERVAL_SECONDS} seconds...")
         time.sleep(SCAN_INTERVAL_SECONDS)
