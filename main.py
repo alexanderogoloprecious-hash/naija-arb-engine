@@ -6,10 +6,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
-from google import genai
 
 # ---------------------------------------------------------------------------
-# Global Configuration
+# Global Configuration & Environment
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -19,11 +18,10 @@ logging.basicConfig(
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GEMINI_API_KEYS_RAW = os.getenv("GEMINI_API_KEY", "")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 300))
-DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", 100000))  # Default ₦100,000
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 180))  # 3 mins default
+DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", 100000))        # ₦100,000 default
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
@@ -32,14 +30,14 @@ DEFAULT_HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
-# Health Check Server (Handles GET, HEAD, & POST for Render + UptimeRobot)
+# Health Server (Fixes UptimeRobot 501 Errors)
 # ---------------------------------------------------------------------------
 class HealthServer(BaseHTTPRequestHandler):
     def _send_ok(self, text="Naija Multi-Bookie Arb Engine is ONLINE."):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        # HEAD requests must not return a response body
+        # HEAD requests must return headers only, no body
         if self.command != "HEAD":
             self.wfile.write(text.encode("utf-8"))
 
@@ -53,28 +51,27 @@ class HealthServer(BaseHTTPRequestHandler):
         self._send_ok()
 
     def log_message(self, format, *args):
-        return
+        return  # Suppress internal HTTP server logging noise
 
 def start_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthServer)
-    logging.info(f"Health server active on port {PORT}...")
+    logging.info(f"Health check server active on port {PORT}...")
     server.serve_forever()
 
 # ---------------------------------------------------------------------------
 # Utility Functions & Team Name Normalizer
 # ---------------------------------------------------------------------------
 def normalize_team_name(name: str) -> str:
-    """Normalizes team names across bookmakers for matching."""
+    """Normalizes team names across bookmakers for accurate matching."""
     name = name.lower()
     for word in [" fc", "fc ", " cf", "cf ", " united", " utd", " town", " city", " athletic", " ath"]:
         name = name.replace(word, "")
     return re.sub(r'[^a-z0-9]', '', name)
 
 # ---------------------------------------------------------------------------
-# Bookmaker Scrapers
+# Direct Bookmaker Scrapers (With Live Logging)
 # ---------------------------------------------------------------------------
 def fetch_sportybet():
-    """SportyBet Nigeria Direct API Scraper"""
     url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
     params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": 50}
     headers = {**DEFAULT_HEADERS, "Referer": "https://www.sportybet.com/ng/"}
@@ -98,12 +95,12 @@ def fetch_sportybet():
                             "bookie": "SportyBet", "home": home, "away": away,
                             "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
                         })
+        logging.info(f"[SportyBet] Fetched {len(matches)} matches.")
     except Exception as e:
-        logging.warning(f"[SportyBet Warning]: {e}")
+        logging.warning(f"[SportyBet Error]: {e}")
     return matches
 
 def fetch_bet9ja():
-    """Bet9ja Nigeria Direct API Scraper"""
     url = "https://sports.bet9ja.com/desktop/feapi/Palimpsest/GetPrematchEvents"
     params = {"sportId": 1, "dayOffset": 0, "pageSize": 50}
     headers = {**DEFAULT_HEADERS, "Referer": "https://sports.bet9ja.com/"}
@@ -125,12 +122,12 @@ def fetch_bet9ja():
                         "bookie": "Bet9ja", "home": home, "away": away,
                         "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
                     })
+        logging.info(f"[Bet9ja] Fetched {len(matches)} matches.")
     except Exception as e:
-        logging.warning(f"[Bet9ja Warning]: {e}")
+        logging.warning(f"[Bet9ja Error]: {e}")
     return matches
 
 def fetch_betking():
-    """BetKing Nigeria Direct API Scraper"""
     url = "https://m.betking.com/api/sports/events/prematch"
     params = {"sportId": 1, "pageSize": 50}
     headers = {**DEFAULT_HEADERS, "Referer": "https://m.betking.com/"}
@@ -153,12 +150,12 @@ def fetch_betking():
                         "bookie": "BetKing", "home": home, "away": away,
                         "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
                     })
+        logging.info(f"[BetKing] Fetched {len(matches)} matches.")
     except Exception as e:
-        logging.warning(f"[BetKing Warning]: {e}")
+        logging.warning(f"[BetKing Error]: {e}")
     return matches
 
 def fetch_1xbet():
-    """1xBet / 22Bet / Melbet Scraper"""
     url = "https://1xbet.ng/LineFeed/Get1x2Zip"
     params = {"sports": 1, "count": 50, "lng": "en"}
     headers = {**DEFAULT_HEADERS, "Referer": "https://1xbet.ng/"}
@@ -179,12 +176,12 @@ def fetch_1xbet():
                         "bookie": "1xBet", "home": home, "away": away,
                         "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
                     })
+        logging.info(f"[1xBet] Fetched {len(matches)} matches.")
     except Exception as e:
-        logging.warning(f"[1xBet Warning]: {e}")
+        logging.warning(f"[1xBet Error]: {e}")
     return matches
 
 def fetch_msport():
-    """MSport Nigeria Direct API Scraper"""
     url = "https://www.msport.com/api/ng/factsCenter/upcomingEvents"
     params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": 50}
     headers = {**DEFAULT_HEADERS, "Referer": "https://www.msport.com/ng/"}
@@ -208,12 +205,12 @@ def fetch_msport():
                             "bookie": "MSport", "home": home, "away": away,
                             "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
                         })
+        logging.info(f"[MSport] Fetched {len(matches)} matches.")
     except Exception as e:
-        logging.warning(f"[MSport Warning]: {e}")
+        logging.warning(f"[MSport Error]: {e}")
     return matches
 
 def fetch_odds_api_fallback():
-    """Fallback Scraper for Betway / Betano"""
     if not ODDS_API_KEY:
         return []
     url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds/?apiKey={ODDS_API_KEY}&regions=eu,uk&markets=h2h"
@@ -238,12 +235,13 @@ def fetch_odds_api_fallback():
                                     "bookie": b_title, "home": home, "away": away,
                                     "norm_key": norm_key, "odds": odds
                                 })
+        logging.info(f"[Odds API] Fetched {len(matches)} matches.")
     except Exception as e:
-        logging.warning(f"[Odds API Warning]: {e}")
+        logging.warning(f"[Odds API Error]: {e}")
     return matches
 
 # ---------------------------------------------------------------------------
-# Cross-Bookmaker Arbitrage Engine
+# Cross-Bookmaker Arbitrage Calculator Engine
 # ---------------------------------------------------------------------------
 def calculate_arbitrage():
     scrapers = [
@@ -283,6 +281,7 @@ def calculate_arbitrage():
 
             implied_sum = (1.0 / best_home["price"]) + (1.0 / best_draw["price"]) + (1.0 / best_away["price"])
 
+            # Arbitrage occurs when sum of inverse odds < 1.0
             if implied_sum < 1.0:
                 roi = round(((1.0 / implied_sum) - 1.0) * 100, 2)
                 payout = DEFAULT_BANKROLL / implied_sum
@@ -307,10 +306,11 @@ def calculate_arbitrage():
     return verified_arbs
 
 # ---------------------------------------------------------------------------
-# Messaging & Telegram Dispatcher
+# Telegram Dispatcher & Message Formatting
 # ---------------------------------------------------------------------------
 def send_telegram(text: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.error("Telegram tokens missing.")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
@@ -318,47 +318,50 @@ def send_telegram(text: str) -> bool:
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
     except Exception as e:
-        logging.error(f"Telegram error: {e}")
+        logging.error(f"Telegram dispatch failed: {e}")
         return False
 
 def format_alert(arb):
-    msg = f"⚡ *ALL-NAIJA ARBITRAGE FOUND* ⚡\n\n"
+    msg = f"⚡ *ALL-NAIJA ARBITRAGE OPPORTUNITY* ⚡\n\n"
     msg += f"⚽ *Match*: {arb['fixture']}\n"
     msg += f"📈 *ROI*: *+{arb['roi']}%*\n"
     msg += f"💰 *Bankroll*: ₦{arb['bankroll']:,.2f}\n"
     msg += f"💵 *Net Profit*: *₦{arb['profit']:,.2f}*\n\n"
-    msg += f"*RECOMMENDED STAKES*:\n"
+    msg += f"*STAKE BREAKDOWN*:\n"
     for out, d in arb['stakes'].items():
-        msg += f"• *{out}* @ *{d['price']}* ({d['bookie']}) ➔ Wager: *₦{d['stake']:,.2f}*\n"
+        msg += f"• *{out}* @ *{d['price']}* ({d['bookie']}) ➔ Stake: *₦{d['stake']:,.2f}*\n"
     return msg
 
 # ---------------------------------------------------------------------------
-# Execution Loop
+# Execution Engine Loop
 # ---------------------------------------------------------------------------
 def run_engine():
-    logging.info("Scanning Nigerian bookmakers...")
+    logging.info("--- Starting new odds scan cycle ---")
     arbs = calculate_arbitrage()
 
+    # SILENT MODE: Log scan results to Render console, do NOT send empty Telegram messages
     if not arbs:
-        logging.info("Scan complete. No arbs found.")
-        send_telegram("📡 *Scanner Active*: Scanned all Nigerian bookmakers. No arbitrage opportunities found right now.")
+        logging.info("Scan complete: 0 arbitrage opportunities found. Silent standby active.")
         return
 
+    # ALERT MODE: Send Telegram alerts only when real arbitrage exists
+    logging.info(f"🚨 Found {len(arbs)} arbitrage opportunity/opportunities!")
     for arb in arbs:
         alert_msg = format_alert(arb)
         send_telegram(alert_msg)
 
 def main():
+    # Start web server for keep-alive monitoring (Render + UptimeRobot)
     threading.Thread(target=start_health_server, daemon=True).start()
     logging.info("Naija Arb Engine Online.")
+    
     while True:
         try:
             run_engine()
         except Exception as e:
-            logging.error(f"Error in main loop: {e}")
+            logging.error(f"Unexpected error in main loop: {e}")
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
     main()
     "Fix UptimeRobot HEAD request"
-    
