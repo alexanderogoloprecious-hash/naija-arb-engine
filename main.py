@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
@@ -14,7 +14,7 @@ except ImportError:
 from google import genai
 
 # ---------------------------------------------------------------------------
-# Configuration & Environment
+# Configuration & Environment Variables
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +30,7 @@ PORT = int(os.getenv("PORT", 10000))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 1800))
 
 # ---------------------------------------------------------------------------
-# Keep-Alive HTTP Server
+# Keep-Alive HTTP Health Check Server
 # ---------------------------------------------------------------------------
 class KeepAliveServer(BaseHTTPRequestHandler):
     def _send_response(self, text="OK"):
@@ -92,7 +92,6 @@ def fetch_and_detect_real_arbs():
         logging.warning("ODDS_API_KEY missing. Cannot fetch structured odds.")
         return [], "No Odds API key configured."
 
-    now_utc = datetime.now(timezone.utc)
     sports = ["soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league"]
     verified_arbs = []
     raw_summary = []
@@ -114,7 +113,6 @@ def fetch_and_detect_real_arbs():
                     away = match.get("away_team")
                     commence = match.get("commence_time")
 
-                    # Gather best odds per outcome across available bookmakers
                     best_h2h = {}
                     for b in match.get("bookmakers", []):
                         bookie_name = b.get("title")
@@ -126,7 +124,6 @@ def fetch_and_detect_real_arbs():
                                     if name not in best_h2h or price > best_h2h[name]["price"]:
                                         best_h2h[name] = {"price": price, "bookie": bookie_name}
 
-                    # Python deterministic math check for 2-way / 3-way arbitrage
                     if len(best_h2h) >= 2:
                         implied_sum = sum(1.0 / item["price"] for item in best_h2h.values() if item["price"] > 0)
                         if implied_sum < 1.0:  # Valid Arbitrage Detected
@@ -146,7 +143,7 @@ def fetch_and_detect_real_arbs():
     return verified_arbs, "\n".join(raw_summary[:10])
 
 # ---------------------------------------------------------------------------
-# Zero-Hallucination Gemini Scan Loop
+# Zero-Hallucination Gemini Scan Loop with Fallbacks & Exponential Backoff
 # ---------------------------------------------------------------------------
 def run_arbitrage_scan():
     api_keys = [k.strip() for k in GEMINI_API_KEYS_RAW.split(",") if k.strip()]
@@ -159,7 +156,6 @@ def run_arbitrage_scan():
 
     verified_arbs, raw_market_data = fetch_and_detect_real_arbs()
 
-    # Zero-hallucination prompt instructing Gemini to ONLY report verified data
     prompt = f"""
     You are 'Naija Arb Scanner'.
 
@@ -180,23 +176,37 @@ def run_arbitrage_scan():
     5. Format the final output clearly for Telegram using bold header lines.
     """
 
-    for key_idx, key in enumerate(api_keys):
+    # Model endpoints updated to active, supported versions
+    valid_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite"]
+
+    for key in api_keys:
         client = genai.Client(api_key=key)
 
-        for model_name in ["gemini-3.5-flash", "gemini-2.5-flash"]:
-            try:
-                logging.info(f"Generating clean alert using {model_name}...")
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt
-                )
+        for model_name in valid_models:
+            # Try up to 3 retries per model to handle temporary 503 high-demand spikes
+            for attempt in range(1, 4):
+                try:
+                    logging.info(f"Generating alert using {model_name} (Attempt {attempt})...")
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
 
-                if response.text and response.text.strip():
-                    send_telegram_alert(response.text.strip())
-                    return
-            except Exception as e:
-                logging.warning(f"Error execution on {model_name}: {e}")
-                continue
+                    if response.text and response.text.strip():
+                        send_telegram_alert(response.text.strip())
+                        return
+                except Exception as e:
+                    err_msg = str(e)
+                    logging.warning(f"Error on {model_name} (Attempt {attempt}): {err_msg}")
+                    
+                    if "503" in err_msg or "UNAVAILABLE" in err_msg or "high demand" in err_msg.lower():
+                        time.sleep(3 * attempt)  # Exponential pause before retry
+                        continue
+                    elif "404" in err_msg or "NOT_FOUND" in err_msg:
+                        logging.warning(f"Model {model_name} endpoint missing/deprecated. Skipping...")
+                        break  # Instantly skip to the next model in valid_models
+                    else:
+                        time.sleep(2)
 
     logging.error("All model execution attempts failed.")
 
@@ -205,7 +215,7 @@ def run_arbitrage_scan():
 # ---------------------------------------------------------------------------
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
-    logging.info("Naija Arb Engine started with Zero-Hallucination protection.")
+    logging.info("Naija Arb Engine started with Zero-Hallucination and Fault-Tolerance protection.")
 
     while True:
         try:
