@@ -8,7 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
 # ---------------------------------------------------------------------------
-# Global Configuration & Environment
+# Logging Configuration
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -16,12 +16,15 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
+# ---------------------------------------------------------------------------
+# Environment Variables
+# ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 180))  # 3 mins default
-DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", 100000))        # ₦100,000 default
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 180))
+DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", 100000))  # Default ₦100,000
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
@@ -30,14 +33,13 @@ DEFAULT_HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
-# Health Server (Fixes UptimeRobot 501 Errors)
+# Health Server (Fixes UptimeRobot HEAD / 501 / 200 Checks)
 # ---------------------------------------------------------------------------
 class HealthServer(BaseHTTPRequestHandler):
     def _send_ok(self, text="Naija Multi-Bookie Arb Engine is ONLINE."):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        # HEAD requests must return headers only, no body
         if self.command != "HEAD":
             self.wfile.write(text.encode("utf-8"))
 
@@ -51,25 +53,24 @@ class HealthServer(BaseHTTPRequestHandler):
         self._send_ok()
 
     def log_message(self, format, *args):
-        return  # Suppress internal HTTP server logging noise
+        return  # Suppress HTTP server noise from Render/UptimeRobot pings
 
 def start_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthServer)
-    logging.info(f"Health check server active on port {PORT}...")
+    logging.info(f"Health check server listening on port {PORT}...")
     server.serve_forever()
 
 # ---------------------------------------------------------------------------
-# Utility Functions & Team Name Normalizer
+# Team Name Normalizer
 # ---------------------------------------------------------------------------
 def normalize_team_name(name: str) -> str:
-    """Normalizes team names across bookmakers for accurate matching."""
     name = name.lower()
     for word in [" fc", "fc ", " cf", "cf ", " united", " utd", " town", " city", " athletic", " ath"]:
         name = name.replace(word, "")
     return re.sub(r'[^a-z0-9]', '', name)
 
 # ---------------------------------------------------------------------------
-# Direct Bookmaker Scrapers (With Live Logging)
+# Bookmaker Scrapers
 # ---------------------------------------------------------------------------
 def fetch_sportybet():
     url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
@@ -212,14 +213,22 @@ def fetch_msport():
 
 def fetch_odds_api_fallback():
     if not ODDS_API_KEY:
+        logging.warning("[Odds API] ODDS_API_KEY environment variable is not configured.")
         return []
-    url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds/?apiKey={ODDS_API_KEY}&regions=eu,uk&markets=h2h"
+
+    # Dynamic query fetching upcoming global soccer fixtures
+    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu,uk,us,au&markets=h2h"
     matches = []
     try:
-        res = requests.get(url, timeout=8)
+        res = requests.get(url, timeout=10)
         if res.status_code == 200:
-            for ev in res.json():
-                home, away = ev.get("home_team"), ev.get("away_team")
+            events = res.json()
+            for ev in events:
+                home = ev.get("home_team")
+                away = ev.get("away_team")
+                if not home or not away:
+                    continue
+                
                 norm_key = f"{normalize_team_name(home)}_{normalize_team_name(away)}"
                 for bookie in ev.get("bookmakers", []):
                     b_title = bookie.get("title")
@@ -227,21 +236,30 @@ def fetch_odds_api_fallback():
                         if mkt.get("key") == "h2h":
                             odds = {}
                             for out in mkt.get("outcomes", []):
-                                if out.get("name") == home: odds["Home"] = float(out.get("price", 0))
-                                elif out.get("name") == away: odds["Away"] = float(out.get("price", 0))
-                                elif out.get("name") == "Draw": odds["Draw"] = float(out.get("price", 0))
+                                if out.get("name") == home:
+                                    odds["Home"] = float(out.get("price", 0))
+                                elif out.get("name") == away:
+                                    odds["Away"] = float(out.get("price", 0))
+                                elif out.get("name") == "Draw":
+                                    odds["Draw"] = float(out.get("price", 0))
+                            
                             if len(odds) == 3:
                                 matches.append({
-                                    "bookie": b_title, "home": home, "away": away,
-                                    "norm_key": norm_key, "odds": odds
+                                    "bookie": b_title,
+                                    "home": home,
+                                    "away": away,
+                                    "norm_key": norm_key,
+                                    "odds": odds
                                 })
-        logging.info(f"[Odds API] Fetched {len(matches)} matches.")
+            logging.info(f"[Odds API] Successfully fetched {len(matches)} active odds entries.")
+        else:
+            logging.warning(f"[Odds API Error]: HTTP {res.status_code} - {res.text}")
     except Exception as e:
-        logging.warning(f"[Odds API Error]: {e}")
+        logging.warning(f"[Odds API Exception]: {e}")
     return matches
 
 # ---------------------------------------------------------------------------
-# Cross-Bookmaker Arbitrage Calculator Engine
+# Arbitrage Calculation Engine
 # ---------------------------------------------------------------------------
 def calculate_arbitrage():
     scrapers = [
@@ -281,7 +299,6 @@ def calculate_arbitrage():
 
             implied_sum = (1.0 / best_home["price"]) + (1.0 / best_draw["price"]) + (1.0 / best_away["price"])
 
-            # Arbitrage occurs when sum of inverse odds < 1.0
             if implied_sum < 1.0:
                 roi = round(((1.0 / implied_sum) - 1.0) * 100, 2)
                 payout = DEFAULT_BANKROLL / implied_sum
@@ -306,7 +323,7 @@ def calculate_arbitrage():
     return verified_arbs
 
 # ---------------------------------------------------------------------------
-# Telegram Dispatcher & Message Formatting
+# Telegram Dispatcher
 # ---------------------------------------------------------------------------
 def send_telegram(text: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -339,19 +356,16 @@ def run_engine():
     logging.info("--- Starting new odds scan cycle ---")
     arbs = calculate_arbitrage()
 
-    # SILENT MODE: Log scan results to Render console, do NOT send empty Telegram messages
     if not arbs:
         logging.info("Scan complete: 0 arbitrage opportunities found. Silent standby active.")
         return
 
-    # ALERT MODE: Send Telegram alerts only when real arbitrage exists
     logging.info(f"🚨 Found {len(arbs)} arbitrage opportunity/opportunities!")
     for arb in arbs:
         alert_msg = format_alert(arb)
         send_telegram(alert_msg)
 
 def main():
-    # Start web server for keep-alive monitoring (Render + UptimeRobot)
     threading.Thread(target=start_health_server, daemon=True).start()
     logging.info("Naija Arb Engine Online.")
     
@@ -364,4 +378,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    "Fix UptimeRobot HEAD request"
