@@ -1,174 +1,151 @@
-import http.server
 import os
-import threading
 import time
+import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from google import genai
-from duckduckgo_search import DDGS
+from google.genai import types
 
-# ==========================================
-# 1. RENDER PORT BINDING (HEALTH CHECK)
-# ==========================================
-PORT = int(os.environ.get("PORT", 10000))
+# ---------------------------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
-class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+# ---------------------------------------------------------------------------
+# Environment Variables
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+PORT = int(os.getenv("PORT", 10000))
+
+# ---------------------------------------------------------------------------
+# HTTP Keep-Alive Health Server (Render & UptimeRobot Compliant)
+# ---------------------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        """Responds to GET health checks from Render."""
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK - Multi-Bookmaker Naija Arb Engine Online")
+        self.wfile.write(b"Naija Arb Engine is UP and operational.")
 
     def do_HEAD(self):
+        """Responds to HEAD ping checks from UptimeRobot (prevents HTTP 501)."""
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
 
     def log_message(self, format, *args):
+        """Suppresses default HTTP request logging to keep output clean."""
         return
 
 def start_health_server():
-    try:
-        server_address = ("0.0.0.0", PORT)
-        httpd = http.server.ThreadingHTTPServer(server_address, HealthCheckHandler)
-        print(f"✅ Render Web Port Listener active on 0.0.0.0:{PORT}", flush=True)
-        httpd.serve_forever()
-    except Exception as e:
-        print(f"❌ Web Port Error: {e}", flush=True)
+    server_address = ("", PORT)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    logging.info(f"Health check server listening on port {PORT}...")
+    httpd.serve_forever()
 
-threading.Thread(target=start_health_server, daemon=True).start()
-time.sleep(1)
-
-# ==========================================
-# 2. TELEGRAM ALERT SYSTEM
-# ==========================================
-raw_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_BOT_TOKEN = raw_token[3:] if raw_token.lower().startswith("bot") else raw_token
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-
-def send_telegram_alert(message: str):
+# ---------------------------------------------------------------------------
+# Telegram Delivery System
+# ---------------------------------------------------------------------------
+def send_telegram_alert(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Missing Telegram credentials.", flush=True)
-        return
+        logging.error("Telegram Bot Token or Chat ID is missing in environment variables.")
+        return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "Markdown",
+        "disable_web_page_preview": True
     }
 
     try:
-        res = requests.post(url, json=payload, timeout=12)
-        if res.status_code == 400 and "parse" in res.text.lower():
-            payload.pop("parse_mode", None)
-            res = requests.post(url, json=payload, timeout=12)
-
-        if res.status_code == 200:
-            print("✅ Telegram alert delivered!", flush=True)
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code == 200:
+            logging.info("Telegram alert delivered successfully.")
+            return True
         else:
-            print(f"❌ Telegram Error ({res.status_code}): {res.text}", flush=True)
+            logging.error(f"Failed to send Telegram alert ({response.status_code}): {response.text}")
+            return False
     except Exception as e:
-        print(f"❌ Telegram Connection Error: {e}", flush=True)
+        logging.error(f"Error during Telegram API request: {e}")
+        return False
 
-# ==========================================
-# 3. EXPANDED NIGERIAN BOOKMAKER WEB SEARCH
-# ==========================================
-def fetch_live_sports_data():
-    queries = [
-        "Premier League football match dates odds Bet9ja SportyBet BetKing today",
-        "NPFL Nigeria football match date live odds 1xBet Betway",
-        "Betano Nigeria MSport live match kickoff time odds",
-        "22Bet Melbet football odds discrepancy fixture date Nigeria",
-        "SportyBet boosted odds vs Bet9ja live lines today date"
-    ]
-    search_results = []
-    
+# ---------------------------------------------------------------------------
+# Gemini Sports Arbitrage Engine
+# ---------------------------------------------------------------------------
+def run_arbitrage_scan():
+    if not GEMINI_API_KEY:
+        logging.error("GEMINI_API_KEY is not configured.")
+        return
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    prompt = """
+    You are 'Naija Arb Scanner', an automated sports arbitrage monitoring system for Nigerian bookmakers (Bet9ja, SportyBet, 1xBet, BetKing, Betway, Betano, MSport, 22Bet, Melbet).
+
+    Task:
+    1. Search current live and upcoming football/sports matches across Nigerian operators for odds discrepancies and arbitrage opportunities.
+    2. Focus on NPFL, EPL, La Liga, UEFA Champions League, and major global leagues.
+
+    Formatting Rules for Output:
+    - DO NOT use Markdown headers (#, ##, ###). Use bold line tags like **Naija Sports Surebet Report**.
+    - DO NOT output raw LaTeX symbols ($ or \\frac). Use plain math notation like (1 / 2.80) + (1 / 2.70).
+    - If high-profit surebets (>= 30% ROI) are detected, mark the top banner as:
+      **STATUS**: 🚨 HIGH-PROFIT SUREBET FOUND (>= 30% ROI)
+    - Always output exact arithmetic check, profit margin ROI %, and a Stake Breakdown based on ₦10,000 total capital.
+    - Include a **MARKET DISCREPANCY WATCHLIST** highlighting tight odds spreads or cross-bookmaker variance.
+    - End with **EXECUTION RULES FOR NIGERIAN TRADERS**.
+    """
+
     try:
-        with DDGS() as ddgs:
-            for q in queries:
-                results = list(ddgs.text(q, max_results=2))
-                for r in results:
-                    search_results.append(f"Title: {r.get('title')}\nSnippet: {r.get('body')}")
-        return "\n\n".join(search_results)
-    except Exception as e:
-        print(f"⚠️ Search error: {e}", flush=True)
-        return "No external web search results available."
-
-# ==========================================
-# 4. GEMINI CLIENT & PROMPT CONFIGURATION
-# ==========================================
-api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-client = genai.Client(api_key=api_key) if api_key else None
-
-MODEL_NAME = "gemini-3.6-flash"
-
-SYSTEM_PROMPT = """
-You are an expert quantitative sports arbitrage analyst specializing in ALL NIGERIAN BOOKMAKERS:
-(SportyBet, Bet9ja, BetKing, 1xBet Nigeria, Betway Nigeria, Betano Nigeria, MSport, 22Bet, Melbet).
-
-Analyze the provided web search context and search for live/upcoming sports surebets.
-
-CRITICAL MANDATE:
-Every single match reported (whether a High-Yield Surebet or a Discrepancy Watchlist item) MUST display the EXACT or ESTIMATED Match Date and Kickoff Time (e.g., "17 Sep 2026, 04:00 PM WAT" or "Today, 17 Sep @ 16:00"). NEVER omit the match date.
-
-STRICT ARBITRAGE RULES:
-1. 2-Way Markets: (1/Odds1) + (1/Odds2) MUST be LESS THAN 1.00.
-2. 3-Way Markets: (1/Odds1) + (1/Odds2) + (1/Odds3) MUST be LESS THAN 1.00.
-3. Profit Margin % = ((1 / Sum of Implied Probabilities) - 1) * 100.
-4. Calculate stake distribution for a TOTAL BUDGET OF ₦10,000 NAIRA.
-
-FORMAT OUTPUT EXACTLY AS:
-
-🔥 **HIGH-YIELD NAIJA SUREBET DETECTED**
-----------------------------------
-📌 **Event**: [Sport / League] — [Team A vs Team B]
-📅 **Kickoff Date & Time**: [Exact Date & Time, e.g., 17 Sep 2026, 4:00 PM]
-🎯 **Market**: [Over/Under / 1X2 / BTTS / Asian Handicap]
-
-📊 **VERIFIED ODDS & BOOKMAKERS**:
-- **Selection 1**: [Option 1] @ **[Odds]** on **[Bookmaker 1]**
-- **Selection 2**: [Option 2] @ **[Odds]** on **[Bookmaker 2]**
-
-📈 **GUARANTEED PROFIT MARGIN**: **[X.XX]%**
-
-💰 **STAKE ALLOCATION (₦10,000 BUDGET)**:
-- **Stake ₦[Amount]** on [Selection 1] @ [Bookmaker 1] ➔ Expected Return: ₦[Return]
-- **Stake ₦[Amount]** on [Selection 2] @ [Bookmaker 2] ➔ Expected Return: ₦[Return]
-- **Net Guaranteed Profit**: ₦[Profit]
-
-----------------------------------
-If no 100% mathematically confirmed surebet exists in this current data cycle, provide a "Market Discrepancy Watchlist" across Bet9ja, SportyBet, BetKing, 1xBet, Betway, Betano, MSport, and 22Bet. EVERY watchlist item MUST also include the 📅 **Kickoff Date & Time**.
-"""
-
-send_telegram_alert("🇳🇬 *All-Bookmaker Engine ONLINE*\n\nScanning across Nigerian bookmakers with full Match Date & Kickoff Time tracking active.")
-
-# ==========================================
-# 5. CONTINUOUS SCANNER LOOP
-# ==========================================
-SCAN_INTERVAL_SECONDS = 900  # 15 minutes
-
-while True:
-    print("\n🇳🇬 Gathering live sports data across all Nigerian bookmakers...", flush=True)
-    live_data = fetch_live_sports_data()
-
-    if client:
-        try:
-            print(f"📡 Analyzing multi-bookmaker odds with Gemini ({MODEL_NAME})...", flush=True)
-            user_content = f"LIVE SEARCH DATA:\n{live_data}\n\n{SYSTEM_PROMPT}"
-            
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=user_content
+        logging.info("Starting new odds scan cycle...")
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}]
             )
+        )
 
-            if response and hasattr(response, "text") and response.text:
-                print("💡 Analysis complete! Sending Telegram alert...", flush=True)
-                send_telegram_alert(f"⚽ *Naija Sports Surebet Alert*\n\n{response.text[:3500]}")
-            else:
-                print("⚠️ Empty response from Gemini.", flush=True)
+        if response.text and response.text.strip():
+            report = response.text.strip()
+            send_telegram_alert(report)
+        else:
+            logging.warning("Gemini engine returned an empty response.")
 
+    except Exception as e:
+        logging.error(f"Error during Gemini arbitrage scan: {e}")
+
+# ---------------------------------------------------------------------------
+# Main Execution Loop
+# ---------------------------------------------------------------------------
+def main():
+    # Start KeepAlive server in a daemon background thread
+    server_thread = threading.Thread(target=start_health_server, daemon=True)
+    server_thread.start()
+
+    # Initial boot alert
+    logging.info("Naija Arb Engine initialized successfully.")
+    send_telegram_alert("🚀 **Naija Arb Engine** online and monitoring odds...")
+
+    # Infinite scanning loop (runs every 15 minutes)
+    while True:
+        try:
+            run_arbitrage_scan()
         except Exception as e:
-            print(f"❌ Gemini Execution Error: {e}", flush=True)
+            logging.error(f"Unexpected loop exception: {e}")
 
-    print(f"⏳ Waiting {SCAN_INTERVAL_SECONDS // 60} minutes for next cycle...", flush=True)
-    time.sleep(SCAN_INTERVAL_SECONDS)
+        logging.info("Sleeping for 15 minutes...")
+        time.sleep(900)
+
+if __name__ == "__main__":
+    main()
