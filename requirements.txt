@@ -1,2 +1,4 @@
-requests
 curl-cffi
+requests
+pydantic
+python-telegram-bot
