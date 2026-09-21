@@ -5,7 +5,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask
 import requests
 from curl_cffi import requests as async_requests
 
@@ -24,14 +24,12 @@ logging.basicConfig(
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-PROXY_URL = os.getenv("PROXY_URL", "")  # e.g., http://user:pass@ip:port
+PROXY_URL = os.getenv("PROXY_URL", "")
 PORT = int(os.getenv("PORT", 10000))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 1800))
 DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", 100000))
 
-# Complete Approved Nigerian Bookmakers Mapping (Core + Category 1 Expansion)
 APPROVED_NAIJA_BOOKIES = {
-    # Core Nigerian Platforms
     "sportybet": "SportyBet 🇳🇬",
     "bet9ja": "Bet9ja 🇳🇬",
     "betking": "BetKing 🇳🇬",
@@ -42,8 +40,6 @@ APPROVED_NAIJA_BOOKIES = {
     "22bet": "22Bet 🇳🇬",
     "melbet": "Melbet 🇳🇬",
     "onexbet": "1xBet 🇳🇬",
-    
-    # Category 1 Expansion (Direct NGN / Instant Bank Transfers)
     "paripesa": "PariPesa 🇳🇬",
     "megapari": "MegaPari 🇳🇬",
     "betwinner": "BetWinner 🇳🇬",
@@ -64,28 +60,16 @@ BROWSER_HEADERS = {
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 # ---------------------------------------------------------------------------
-# Health Server (Keeps Render Free Instance Active)
+# Flask Web App (For Render Port Binding & UptimeRobot Pings)
 # ---------------------------------------------------------------------------
-class HealthServer(BaseHTTPRequestHandler):
-    def _send_ok(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(b"Naija-Only Arb Engine Active.")
+app = Flask(__name__)
 
-    def do_GET(self): self._send_ok()
-    def do_HEAD(self): self._send_ok()
-    def do_POST(self): self._send_ok()
-    def log_message(self, format, *args): return
-
-def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthServer)
-    logging.info(f"Health server active on port {PORT}...")
-    server.serve_forever()
+@app.route('/')
+def health_check():
+    return "Naija Arb Engine Active", 200
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Scrapers & Helper Functions
 # ---------------------------------------------------------------------------
 def normalize_team_name(name: str) -> str:
     if not name:
@@ -118,9 +102,6 @@ def format_match_date(date_val) -> str:
         pass
     return str(date_val)
 
-# ---------------------------------------------------------------------------
-# Direct Scrapers (Browser Impersonation & Proxies)
-# ---------------------------------------------------------------------------
 def fetch_sportybet():
     url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
     params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": "50"}
@@ -155,110 +136,6 @@ def fetch_sportybet():
         logging.info(f"[SportyBet] Fetched {len(matches)} matches.")
     except Exception as e:
         logging.warning(f"[SportyBet Error]: {e}")
-    return matches
-
-def fetch_bet9ja():
-    url = "https://sports.bet9ja.com/desktop/feapi/Palimpsest/GetPrematchEvents"
-    params = {"sportId": 1, "dayOffset": 0, "pageSize": 50}
-    matches = []
-    try:
-        session = async_requests.Session(impersonate="chrome120")
-        headers = {**BROWSER_HEADERS, "Referer": "https://sports.bet9ja.com/"}
-        res = session.get(url, params=params, headers=headers, proxies=PROXIES, timeout=12)
-        
-        if res.status_code == 200:
-            data = res.json().get("data", {})
-            events = data.get("events", []) if isinstance(data, dict) else []
-            for ev in events:
-                home, away = ev.get("home_team"), ev.get("away_team")
-                match_time = format_match_date(ev.get("start_time"))
-                if not home or not away: continue
-                raw_odds = ev.get("odds", {})
-                odds = {
-                    "Home": float(raw_odds.get("1", 0)),
-                    "Draw": float(raw_odds.get("X", 0)),
-                    "Away": float(raw_odds.get("2", 0))
-                }
-                if all(v > 1.0 for v in odds.values()):
-                    matches.append({
-                        "bookie": APPROVED_NAIJA_BOOKIES["bet9ja"], "home": home, "away": away,
-                        "match_date": match_time,
-                        "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
-                    })
-        logging.info(f"[Bet9ja] Fetched {len(matches)} matches.")
-    except Exception as e:
-        logging.warning(f"[Bet9ja Error]: {e}")
-    return matches
-
-def fetch_betking():
-    url = "https://m.betking.com/api/sports/events/prematch"
-    params = {"sportId": 1, "pageSize": 50}
-    matches = []
-    try:
-        session = async_requests.Session(impersonate="chrome120")
-        headers = {**BROWSER_HEADERS, "Referer": "https://m.betking.com/"}
-        res = session.get(url, params=params, headers=headers, proxies=PROXIES, timeout=12)
-        
-        if res.status_code == 200:
-            data = res.json().get("data", [])
-            if isinstance(data, list):
-                for ev in data:
-                    home, away = ev.get("homeTeam"), ev.get("awayTeam")
-                    match_time = format_match_date(ev.get("scheduledStart"))
-                    if not home or not away: continue
-                    odds = {}
-                    for mkt in ev.get("markets", []):
-                        if mkt.get("name") in ["1X2", "Match Result"]:
-                            for opt in mkt.get("options", []):
-                                name = str(opt.get("name", ""))
-                                if name in ["1", "Home"]: odds["Home"] = float(opt.get("odds", 0))
-                                elif name in ["X", "Draw"]: odds["Draw"] = float(opt.get("odds", 0))
-                                elif name in ["2", "Away"]: odds["Away"] = float(opt.get("odds", 0))
-                    if len(odds) == 3 and all(v > 1.0 for v in odds.values()):
-                        matches.append({
-                            "bookie": APPROVED_NAIJA_BOOKIES["betking"], "home": home, "away": away,
-                            "match_date": match_time,
-                            "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
-                        })
-        logging.info(f"[BetKing] Fetched {len(matches)} matches.")
-    except Exception as e:
-        logging.warning(f"[BetKing Error]: {e}")
-    return matches
-
-def fetch_msport():
-    url = "https://www.msport.com/api/ng/factsCenter/upcomingEvents"
-    params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": "50"}
-    matches = []
-    try:
-        session = async_requests.Session(impersonate="chrome120")
-        headers = {**BROWSER_HEADERS, "Referer": "https://www.msport.com/ng/"}
-        res = session.get(url, params=params, headers=headers, proxies=PROXIES, timeout=12)
-        
-        if res.status_code == 200:
-            data = res.json().get("data", {})
-            tournaments = data.get("tournaments", []) if isinstance(data, dict) else []
-            for tourney in tournaments:
-                for ev in tourney.get("events", []):
-                    home, away = ev.get("homeTeamName"), ev.get("awayTeamName")
-                    match_time = format_match_date(ev.get("estimateStartTime"))
-                    if not home or not away: continue
-                    odds = {}
-                    for mkt in ev.get("markets", []):
-                        if str(mkt.get("id")) in ["1", "sr:market:1"]:
-                            for out in mkt.get("outcomes", []):
-                                desc = str(out.get("desc", ""))
-                                if desc == "1": odds["Home"] = float(out.get("odds", 0))
-                                elif desc == "X": odds["Draw"] = float(out.get("odds", 0))
-                                elif desc == "2": odds["Away"] = float(out.get("odds", 0))
-                    if len(odds) == 3 and all(v > 1.0 for v in odds.values()):
-                        matches.append({
-                            "bookie": APPROVED_NAIJA_BOOKIES["msport"], "home": home, "away": away,
-                            "match_date": match_time,
-                            "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
-                        })
-        logging.info(f"[MSport] Fetched {len(matches)} matches.")
-    except Exception as e:
-        logging.warning(f"[MSport Error]: {e}")
     return matches
 
 def fetch_odds_api_filtered():
@@ -300,16 +177,13 @@ def fetch_odds_api_filtered():
                                     "norm_key": norm_key,
                                     "odds": odds
                                 })
-            logging.info(f"[Odds API Filtered] Fetched {len(matches)} valid Nigerian bookmaker odds entries.")
+            logging.info(f"[Odds API Filtered] Fetched {len(matches)} entries.")
     except Exception as e:
         logging.warning(f"[Odds API Exception]: {e}")
     return matches
 
-# ---------------------------------------------------------------------------
-# Calculation Engine
-# ---------------------------------------------------------------------------
 def calculate_arbitrage():
-    scrapers = [fetch_sportybet, fetch_bet9ja, fetch_betking, fetch_msport, fetch_odds_api_filtered]
+    scrapers = [fetch_sportybet, fetch_odds_api_filtered]
     all_matches = []
 
     with ThreadPoolExecutor(max_workers=len(scrapers)) as executor:
@@ -370,15 +244,13 @@ def calculate_arbitrage():
 
 def send_telegram(text: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("Telegram credentials missing.")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
-    except Exception as e:
-        logging.error(f"Telegram dispatch failed: {e}")
+    except Exception:
         return False
 
 def format_alert(arb):
@@ -393,28 +265,25 @@ def format_alert(arb):
         msg += f"• *{out}* @ *{d['price']}* ({d['bookie']}) ➔ Stake: *₦{d['stake']:,.2f}*\n"
     return msg
 
-def run_engine():
-    logging.info("--- Scanning active markets for Nigerian bookmaker arbitrage ---")
-    arbs = calculate_arbitrage()
-
-    if not arbs:
-        logging.info("Scan completed: 0 valid Nigerian surebets at this time.")
-        return
-
-    logging.info(f"🚨 Found {len(arbs)} active Nigerian arbitrage opportunity/opportunities!")
-    for arb in arbs:
-        send_telegram(format_alert(arb))
-
-def main():
-    threading.Thread(target=start_health_server, daemon=True).start()
-    logging.info("Naija Arb Engine Online (Expanded Nigerian Bookies Mode with Impersonation & Dates).")
-    
+def scan_loop():
     while True:
         try:
-            run_engine()
+            logging.info("--- Starting Arbitrage Engine Scan ---")
+            arbs = calculate_arbitrage()
+            if arbs:
+                for arb in arbs:
+                    send_telegram(format_alert(arb))
+            else:
+                logging.info("Scan complete: Found 0 valid arbitrage opportunities.")
         except Exception as e:
-            logging.error(f"Execution error: {e}")
+            logging.error(f"Scan loop error: {e}")
         time.sleep(SCAN_INTERVAL_SECONDS)
 
+# ---------------------------------------------------------------------------
+# Background Scanning & Web Server Startup
+# ---------------------------------------------------------------------------
+# Start scanner thread in background
+threading.Thread(target=scan_loop, daemon=True).start()
+
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=PORT)
