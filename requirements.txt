@@ -1,12 +1,2 @@
-google-genai
 requests
-ddgs
-pydantic
-pydantic-core
-sniffio
-tenacity
-typing-extensions
-typing-inspection
-urllib3
-websockets
-curl_cffi
+curl-cffi
