@@ -1,294 +1,245 @@
 import os
-import re
 import time
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import requests
+from datetime import datetime
+from curl_cffi import requests as async_requests
 
-# Import curl_cffi for Cloudflare TLS-fingerprint bypass
-try:
-    from curl_cffi import requests as cf_requests
-except ImportError:
-    import requests as cf_requests
-
-import requests  # Standard requests fallback
-
-# ---------------------------------------------------------------------------
-# Logging Setup
-# ---------------------------------------------------------------------------
+# Configuration & Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    handlers=[logging.StreamHandler()]
 )
 
-# ---------------------------------------------------------------------------
 # Environment Variables
-# ---------------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")        # Optional: Odds API Key
-PROXY_URL = os.getenv("PROXY_URL", "")              # Optional: Proxy URL (e.g., http://user:pass@ip:port)
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 45))
-PORT = int(os.getenv("PORT", 10000))
-TOTAL_STAKE = float(os.getenv("TOTAL_STAKE", 10000.0))
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+PROXY_URL = os.getenv("PROXY_URL", "")  # e.g., http://vlzmxumu:d2m12x8awv7a@31.59.20.176:6754
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+# Approved Nigerian Bookmakers Mapping
+APPROVED_NAIJA_BOOKIES = {
+    "1xbet": "1xBet",
+    "betway": "Betway",
+    "betano": "Betano",
+    "22bet": "22Bet",
+    "melbet": "Melbet",
+    "sportybet": "SportyBet",
+    "bet9ja": "Bet9ja",
+    "betking": "BetKing",
+    "msport": "MSport"
+}
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Configured Proxy Dictionary
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+def normalize_team_name(name: str) -> str:
+    """Normalize team names for accurate arbitrage matching."""
+    if not name:
+        return ""
+    clean = name.lower().strip()
+    replacements = ["fc", "club", "utd", "united", "city", "town"]
+    for word in replacements:
+        clean = clean.replace(f" {word}", "").replace(f"{word} ", "")
+    return "".join(e for e in clean if e.isalnum())
 
-# ---------------------------------------------------------------------------
-# Keep-Alive Health Server (Render & UptimeRobot Compliant)
-# ---------------------------------------------------------------------------
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Naija Multi-Bookie Arb Engine Active!")
-
-    def log_message(self, format, *args):
-        return
-
-def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
-    logging.info(f"Health check server running on port {PORT}")
-    server.serve_forever()
-
-# ---------------------------------------------------------------------------
-# Telegram Notifications
-# ---------------------------------------------------------------------------
-def send_telegram_alert(message: str) -> bool:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("Telegram credentials missing.")
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
+def format_match_date(date_str: str) -> str:
+    """Format match timestamps into readable string."""
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        res.raise_for_status()
-        return True
-    except Exception as e:
-        logging.error(f"Failed to deliver Telegram alert: {e}")
-        return False
+        if isinstance(date_str, (int, float)):
+            dt = datetime.fromtimestamp(date_str / 1000)
+        else:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "Upcoming"
 
-# ---------------------------------------------------------------------------
-# Helper Functions & Normalization
-# ---------------------------------------------------------------------------
-def normalize_team(name: str) -> str:
-    name = name.lower()
-    for word in [" fc", "fc ", " cf", "cf ", " united", " utd", " town", " city", " athletic"]:
-        name = name.replace(word, "")
-    return re.sub(r'[^a-z0-9]', '', name)
+# --- SCRAPERS ---
 
-def safe_get(url, params=None):
-    """Executes requests using curl_cffi Chrome impersonation with proxy fallback."""
-    try:
-        res = cf_requests.get(
-            url,
-            params=params,
-            headers=HEADERS,
-            impersonate="chrome",  # Set to generic chrome for universal version compatibility
-            proxies=PROXIES,
-            timeout=10
-        )
-        if res.status_code == 200:
-            return res.json()
-    except Exception as e:
-        logging.warning(f"Failed fetch for {url}: {e}")
-    return None
-
-# ---------------------------------------------------------------------------
-# Direct Bookmaker Scrapers (Options 1 & 2)
-# ---------------------------------------------------------------------------
-def fetch_sportybet():
-    url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
-    data = safe_get(url, params={"sportId": "sr:sport:1", "pageSize": 50})
-    matches = []
-    if data:
-        for tourney in data.get("data", {}).get("tournaments", []):
-            for ev in tourney.get("events", []):
-                home, away = ev.get("homeTeamName"), ev.get("awayTeamName")
-                if not home or not away: continue
-                odds = {}
-                for mkt in ev.get("markets", []):
-                    if mkt.get("id") == "1":
-                        for out in mkt.get("outcomes", []):
-                            if out.get("desc") == "1": odds["1"] = float(out.get("odds", 0))
-                            elif out.get("desc") == "X": odds["X"] = float(out.get("odds", 0))
-                            elif out.get("desc") == "2": odds["2"] = float(out.get("odds", 0))
-                if len(odds) == 3:
-                    matches.append({
-                        "bookie": "SportyBet", "home": home, "away": away,
-                        "key": f"{normalize_team(home)}_{normalize_team(away)}", "odds": odds
-                    })
-    logging.info(f"[SportyBet] Fetched {len(matches)} matches")
-    return matches
-
-def fetch_bet9ja():
-    url = "https://sports.bet9ja.com/desktop/feapi/Palimpsest/GetPrematchEvents"
-    data = safe_get(url, params={"SPORT_ID": 1, "LIMIT": 50})
-    matches = []
-    if data:
-        for ev in data.get("D", {}).get("E", []):
-            home, away = ev.get("H"), ev.get("A")
-            if not home or not away: continue
-            raw_odds = ev.get("O", {})
-            h, d, a = raw_odds.get("1"), raw_odds.get("X"), raw_odds.get("2")
-            if h and d and a:
-                matches.append({
-                    "bookie": "Bet9ja", "home": home, "away": away,
-                    "key": f"{normalize_team(home)}_{normalize_team(away)}",
-                    "odds": {"1": float(h), "X": float(d), "2": float(a)}
-                })
-    logging.info(f"[Bet9ja] Fetched {len(matches)} matches")
-    return matches
-
-def fetch_msport():
-    url = "https://www.msport.com/api/ng/factsCenter/upcomingEvents"
-    data = safe_get(url, params={"sportId": "sr:sport:1", "pageSize": 50})
-    matches = []
-    if data:
-        for tourney in data.get("data", {}).get("tournaments", []):
-            for ev in tourney.get("events", []):
-                home, away = ev.get("homeTeamName"), ev.get("awayTeamName")
-                if not home or not away: continue
-                odds = {}
-                for mkt in ev.get("markets", []):
-                    if mkt.get("id") == "1":
-                        for out in mkt.get("outcomes", []):
-                            if out.get("desc") == "1": odds["1"] = float(out.get("odds", 0))
-                            elif out.get("desc") == "X": odds["X"] = float(out.get("odds", 0))
-                            elif out.get("desc") == "2": odds["2"] = float(out.get("odds", 0))
-                if len(odds) == 3:
-                    matches.append({
-                        "bookie": "MSport", "home": home, "away": away,
-                        "key": f"{normalize_team(home)}_{normalize_team(away)}", "odds": odds
-                    })
-    logging.info(f"[MSport] Fetched {len(matches)} matches")
-    return matches
-
-# ---------------------------------------------------------------------------
-# The Odds API Scraper (Option 3 Backup)
-# ---------------------------------------------------------------------------
-def fetch_odds_api():
+def fetch_odds_api_markets() -> list:
+    """Fetch odds from The Odds API for Nigerian bookmakers."""
     if not ODDS_API_KEY:
+        logging.warning("[Odds API] No API key provided.")
         return []
-    url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
+
+    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/"
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": "eu,uk",
-        "markets": "h2h"
+        "markets": "h2h",
+        "dateFormat": "iso"
     }
-    matches = []
+
+    odds_entries = []
     try:
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code == 200:
-            for game in res.json():
-                home, away = game.get("home_team"), game.get("away_team")
-                for bookie in game.get("bookmakers", []):
-                    b_title = bookie.get("title")
-                    for mkt in bookie.get("markets", []):
-                        if mkt.get("key") == "h2h":
-                            odds = {}
-                            for outcome in mkt.get("outcomes", []):
-                                if outcome.get("name") == home: odds["1"] = float(outcome.get("price"))
-                                elif outcome.get("name") == away: odds["2"] = float(outcome.get("price"))
-                                elif outcome.get("name") == "Draw": odds["X"] = float(outcome.get("price"))
-                            if len(odds) == 3:
-                                matches.append({
-                                    "bookie": f"{b_title} (OddsAPI)", "home": home, "away": away,
-                                    "key": f"{normalize_team(home)}_{normalize_team(away)}", "odds": odds
-                                })
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code == 200:
+            events = response.json()
+            for ev in events:
+                home, away = ev.get("home_team"), ev.get("away_team")
+                match_time = format_match_date(ev.get("commence_time"))
+                
+                for bkm in ev.get("bookmakers", []):
+                    bkm_key = bkm.get("key", "").lower()
+                    if bkm_key in APPROVED_NAIJA_BOOKIES:
+                        for mkt in bkm.get("markets", []):
+                            if mkt.get("key") == "h2h":
+                                odds = {}
+                                for out in mkt.get("outcomes", []):
+                                    if out.get("name") == home:
+                                        odds["Home"] = float(out.get("price", 0))
+                                    elif out.get("name") == away:
+                                        odds["Away"] = float(out.get("price", 0))
+                                    elif out.get("name") == "Draw":
+                                        odds["Draw"] = float(out.get("price", 0))
+                                
+                                if len(odds) == 3:
+                                    odds_entries.append({
+                                        "bookie": APPROVED_NAIJA_BOOKIES[bkm_key],
+                                        "home": home,
+                                        "away": away,
+                                        "match_date": match_time,
+                                        "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}",
+                                        "odds": odds
+                                    })
+        logging.info(f"[Odds API] Fetched {len(odds_entries)} valid Nigerian bookmaker odds entries.")
     except Exception as e:
-        logging.warning(f"[OddsAPI Error]: {e}")
-    logging.info(f"[Odds API] Fetched {len(matches)} matches")
+        logging.error(f"[Odds API Error]: {e}")
+
+    return odds_entries
+
+def fetch_sportybet_direct() -> list:
+    """Fetch SportyBet odds bypassing Cloudflare via curl_cffi and Proxy."""
+    url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
+    params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": 50}
+    matches = []
+    
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
+    try:
+        res = async_requests.get(
+            url, 
+            params=params, 
+            headers=DEFAULT_HEADERS, 
+            impersonate="chrome120", 
+            proxies=proxies, 
+            timeout=12
+        )
+        if res.status_code == 200:
+            data = res.json()
+            for tourney in data.get("data", {}).get("tournaments", []):
+                for ev in tourney.get("events", []):
+                    home, away = ev.get("homeTeamName"), ev.get("awayTeamName")
+                    match_time = format_match_date(ev.get("estimateStartTime"))
+                    if not home or not away:
+                        continue
+                    
+                    odds = {}
+                    for mkt in ev.get("markets", []):
+                        if mkt.get("id") == "1":
+                            for out in mkt.get("outcomes", []):
+                                if out.get("desc") == "1": odds["Home"] = float(out.get("odds", 0))
+                                elif out.get("desc") == "X": odds["Draw"] = float(out.get("odds", 0))
+                                elif out.get("desc") == "2": odds["Away"] = float(out.get("odds", 0))
+                    
+                    if len(odds) == 3:
+                        matches.append({
+                            "bookie": APPROVED_NAIJA_BOOKIES["sportybet"],
+                            "home": home,
+                            "away": away,
+                            "match_date": match_time,
+                            "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}",
+                            "odds": odds
+                        })
+        logging.info(f"[SportyBet] Fetched {len(matches)} matches.")
+    except Exception as e:
+        logging.warning(f"[SportyBet Error]: {e}")
+        
     return matches
 
-# ---------------------------------------------------------------------------
-# Master Execution & Aggregation Engine
-# ---------------------------------------------------------------------------
-def run_all_scrapers():
-    scrapers = [fetch_sportybet, fetch_bet9ja, fetch_msport, fetch_odds_api]
-    all_matches = []
+# --- ARBITRAGE CALCULATOR ---
 
-    with ThreadPoolExecutor(max_workers=len(scrapers)) as executor:
-        futures = [executor.submit(s) for s in scrapers]
-        for future in as_completed(futures):
-            all_matches.extend(future.result())
+def calculate_arbitrage(all_matches: list) -> list:
+    """Group matches by normalized team key and check for SureBet profit margins."""
+    grouped = {}
+    for entry in all_matches:
+        key = entry["norm_key"]
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(entry)
 
-    aggregated = {}
-    for match in all_matches:
-        key = match["key"]
-        if key not in aggregated:
-            aggregated[key] = {
-                "display": f"{match['home']} vs {match['away']}",
-                "outcomes": {"1": [], "X": [], "2": []}
-            }
-        for o_type, val in match["odds"].items():
-            if val > 1.0:
-                aggregated[key]["outcomes"][o_type].append({"bookie": match["bookie"], "odds": val})
+    surebets = []
+    for key, entries in grouped.items():
+        if len(entries) < 2:
+            continue
 
-    arbs_count = 0
-    for key, data in aggregated.items():
-        outs = data["outcomes"]
-        if outs["1"] and outs["X"] and outs["2"]:
-            best_1 = max(outs["1"], key=lambda x: x["odds"])
-            best_X = max(outs["X"], key=lambda x: x["odds"])
-            best_2 = max(outs["2"], key=lambda x: x["odds"])
+        best_home = max(entries, key=lambda x: x["odds"]["Home"])
+        best_draw = max(entries, key=lambda x: x["odds"]["Draw"])
+        best_away = max(entries, key=lambda x: x["odds"]["Away"])
 
-            implied_sum = (1.0 / best_1["odds"]) + (1.0 / best_X["odds"]) + (1.0 / best_2["odds"])
+        o1, o2, o3 = best_home["odds"]["Home"], best_draw["odds"]["Draw"], best_away["odds"]["Away"]
+        if o1 <= 0 or o2 <= 0 or o3 <= 0:
+            continue
 
-            if implied_sum < 1.0:
-                roi = round(((1.0 / implied_sum) - 1.0) * 100, 2)
-                if 0.5 <= roi <= 20.0:
-                    arbs_count += 1
-                    s1 = round((TOTAL_STAKE / best_1["odds"]) / implied_sum, 2)
-                    sx = round((TOTAL_STAKE / best_X["odds"]) / implied_sum, 2)
-                    s2 = round((TOTAL_STAKE / best_2["odds"]) / implied_sum, 2)
-                    profit = round((TOTAL_STAKE / implied_sum) - TOTAL_STAKE, 2)
+        arb_margin = (1 / o1) + (1 / o2) + (1 / o3)
+        if arb_margin < 1.0:
+            profit_pct = round((1 - arb_margin) * 100, 2)
+            surebets.append({
+                "match": f"{best_home['home']} vs {best_home['away']}",
+                "match_date": best_home["match_date"],
+                "profit": profit_pct,
+                "outcomes": {
+                    "Home": {"bookie": best_home["bookie"], "odds": o1},
+                    "Draw": {"bookie": best_draw["bookie"], "odds": o2},
+                    "Away": {"bookie": best_away["bookie"], "odds": o3}
+                }
+            })
+    return surebets
 
-                    msg = (
-                        f"⚡ *HYBRID SUREBET FOUND* ⚡\n\n"
-                        f"⚽ *Match*: {data['display']}\n"
-                        f"📈 *ROI*: *+{roi}%* | *Profit*: *₦{profit:,.2f}*\n\n"
-                        f"📌 *STAKE BREAKDOWN (Total ₦{TOTAL_STAKE:,.0f})*:\n"
-                        f"• *1 (Home)*: {best_1['bookie']} @ *{best_1['odds']}* ➔ Bet *₦{s1:,.2f}*\n"
-                        f"• *X (Draw)*: {best_X['bookie']} @ *{best_X['odds']}* ➔ Bet *₦{sx:,.2f}*\n"
-                        f"• *2 (Away)*: {best_2['bookie']} @ *{best_2['odds']}* ➔ Bet *₦{s2:,.2f}*\n"
-                    )
-                    send_telegram_alert(msg)
+def send_telegram_alert(surebets: list):
+    """Send alert to Telegram channel when arbitrage is found."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
 
-    logging.info(f"Scan finished: {arbs_count} surebets detected.")
-
-# ---------------------------------------------------------------------------
-# Script Initialization
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    threading.Thread(target=start_health_server, daemon=True).start()
-    logging.info("Multi-Strategy Arb Engine Online")
-    send_telegram_alert("🚀 *Multi-Strategy Engine Active!* Using Browser Impersonation + Proxies + Odds API...")
-
-    while True:
+    for sb in surebets:
+        msg = (
+            f"🚨 <b>SUREBET OPPORTUNITY ({sb['profit']}%)</b> 🚨\n\n"
+            f"⚽ <b>Match:</b> {sb['match']}\n"
+            f"📅 <b>Date:</b> {sb['match_date']}\n\n"
+            f"🔹 <b>Home (1):</b> {sb['outcomes']['Home']['odds']} @ {sb['outcomes']['Home']['bookie']}\n"
+            f"🔹 <b>Draw (X):</b> {sb['outcomes']['Draw']['odds']} @ {sb['outcomes']['Draw']['bookie']}\n"
+            f"🔹 <b>Away (2):</b> {sb['outcomes']['Away']['odds']} @ {sb['outcomes']['Away']['bookie']}\n"
+        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
         try:
-            run_all_scrapers()
+            requests.post(url, json=payload, timeout=5)
         except Exception as e:
-            logging.error(f"Main loop error: {e}")
-        time.sleep(SCAN_INTERVAL_SECONDS)
+            logging.error(f"[Telegram Error]: {e}")
+
+# --- MAIN EXECUTION ENGINE ---
+
+def run_scan():
+    """Main scanning routine."""
+    logging.info("--- Starting Arbitrage Engine Scan ---")
+    
+    odds_api_results = fetch_odds_api_markets()
+    sportybet_results = fetch_sportybet_direct()
+    
+    all_data = odds_api_results + sportybet_results
+    
+    surebets = calculate_arbitrage(all_data)
+    logging.info(f"Scan complete: Found {len(surebets)} valid arbitrage opportunities.")
+    
+    if surebets:
+        send_telegram_alert(surebets)
+
+if __name__ == "__main__":
+    logging.info("Naija Arb Engine Online (Strictly Nigerian Bookies Mode)")
+    while True:
+        run_scan()
+        time.sleep(300)  # Runs every 5 minutes
