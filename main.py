@@ -8,10 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask
 import requests
 
+# Fallback mechanism for curl_cffi TLS impersonation
 try:
     from curl_cffi import requests as async_requests
+    HAS_CURL_CFFI = True
 except ImportError:
     import requests as async_requests
+    HAS_CURL_CFFI = False
 
 # ---------------------------------------------------------------------------
 # Logging Setup
@@ -23,7 +26,7 @@ logging.basicConfig(
 )
 
 # ---------------------------------------------------------------------------
-# Environment Variables
+# Environment & Configuration Variables
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -56,11 +59,11 @@ APPROVED_NAIJA_BOOKIES = {
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 # ---------------------------------------------------------------------------
-# Flask Web App (Render Port Binding & Health Check)
+# Flask Web Server (Render Health Checks)
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
-@app.route('/')
+@app.route('/', methods=['GET', 'HEAD'])
 def health_check():
     return "Naija Arb Engine Active", 200
 
@@ -102,25 +105,25 @@ def format_match_date(date_val) -> str:
 # Bookmaker Data Scrapers
 # ---------------------------------------------------------------------------
 def fetch_sportybet():
-    url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
+    # Direct endpoint used by SportyBet web client
+    url = "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents"
     params = {
         "sportId": "sr:sport:1", 
         "marketId": "1,18,60",
-        "pageSize": "100"
+        "pageSize": "50"
     }
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-NG,en-US;q=0.9,en;q=0.8",
-        "Referer": "https://www.sportybet.com/ng/m/sport/football",
-        "Origin": "https://www.sportybet.com",
-        "X-Requested-With": "XMLHttpRequest",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.sportybet.com/ng/",
+        "Origin": "https://www.sportybet.com"
     }
     
     matches = []
     try:
-        if hasattr(async_requests, "Session"):
+        if HAS_CURL_CFFI:
             session = async_requests.Session(impersonate="chrome120")
             res = session.get(url, params=params, headers=headers, proxies=PROXIES, timeout=15)
         else:
@@ -129,11 +132,12 @@ def fetch_sportybet():
         if res.status_code == 200:
             res_data = res.json()
             if res_data.get("bizCode") == 10000:
-                data = res_data.get("data", {})
-                tournaments = data.get("tournaments", []) if isinstance(data, dict) else []
+                data = res_data.get("data", [])
+                events_list = data if isinstance(data, list) else data.get("tournaments", [])
                 
-                for tourney in tournaments:
-                    for ev in tourney.get("events", []):
+                for item in events_list:
+                    events = item.get("events", []) if isinstance(item, dict) else []
+                    for ev in events:
                         home = ev.get("homeTeamName")
                         away = ev.get("awayTeamName")
                         match_time = format_match_date(ev.get("estimateStartTime"))
@@ -210,7 +214,7 @@ def fetch_odds_api_filtered():
     return matches
 
 # ---------------------------------------------------------------------------
-# Core Arbitrage Logic & Telegram Dispatcher
+# Core Arbitrage Calculation Engine
 # ---------------------------------------------------------------------------
 def calculate_arbitrage():
     scrapers = [fetch_sportybet, fetch_odds_api_filtered]
@@ -272,6 +276,9 @@ def calculate_arbitrage():
 
     return verified_arbs
 
+# ---------------------------------------------------------------------------
+# Telegram Alerts
+# ---------------------------------------------------------------------------
 def send_telegram(text: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
@@ -303,6 +310,7 @@ def scan_loop():
             if arbs:
                 for arb in arbs:
                     send_telegram(format_alert(arb))
+                logging.info(f"Scan complete: Found and sent {len(arbs)} arbitrage alerts!")
             else:
                 logging.info("Scan complete: Found 0 valid arbitrage opportunities.")
         except Exception as e:
@@ -310,7 +318,7 @@ def scan_loop():
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 # ---------------------------------------------------------------------------
-# Engine Execution
+# Execution Entry Point
 # ---------------------------------------------------------------------------
 threading.Thread(target=scan_loop, daemon=True).start()
 
