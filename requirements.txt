@@ -1,7 +1,6 @@
 google-genai
 requests
 ddgs
-requests
 pydantic
 pydantic-core
 sniffio
