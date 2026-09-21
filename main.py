@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask
 import requests
-from curl_cffi import requests as async_requests
+
+try:
+    from curl_cffi import requests as async_requests
+except ImportError:
+    import requests as async_requests
 
 # ---------------------------------------------------------------------------
 # Logging Setup
@@ -49,18 +53,10 @@ APPROVED_NAIJA_BOOKIES = {
     "bangbet": "BangBet 🇳🇬"
 }
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
-
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 # ---------------------------------------------------------------------------
-# Flask Web App (For Render Port Binding & UptimeRobot Pings)
+# Flask Web App (Render Port Binding & Health Check)
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
@@ -69,7 +65,7 @@ def health_check():
     return "Naija Arb Engine Active", 200
 
 # ---------------------------------------------------------------------------
-# Scrapers & Helper Functions
+# Helper Functions & Normalization
 # ---------------------------------------------------------------------------
 def normalize_team_name(name: str) -> str:
     if not name:
@@ -102,37 +98,67 @@ def format_match_date(date_val) -> str:
         pass
     return str(date_val)
 
+# ---------------------------------------------------------------------------
+# Bookmaker Data Scrapers
+# ---------------------------------------------------------------------------
 def fetch_sportybet():
     url = "https://www.sportybet.com/api/ng/factsCenter/upcomingEvents"
-    params = {"sportId": "sr:sport:1", "marketId": "1", "pageSize": "50"}
+    params = {
+        "sportId": "sr:sport:1", 
+        "marketId": "1,18,60",
+        "pageSize": "100"
+    }
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-NG,en-US;q=0.9,en;q=0.8",
+        "Referer": "https://www.sportybet.com/ng/m/sport/football",
+        "Origin": "https://www.sportybet.com",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    
     matches = []
     try:
-        session = async_requests.Session(impersonate="chrome120")
-        headers = {**BROWSER_HEADERS, "Referer": "https://www.sportybet.com/ng/m/"}
-        res = session.get(url, params=params, headers=headers, proxies=PROXIES, timeout=12)
-        
+        if hasattr(async_requests, "Session"):
+            session = async_requests.Session(impersonate="chrome120")
+            res = session.get(url, params=params, headers=headers, proxies=PROXIES, timeout=15)
+        else:
+            res = requests.get(url, params=params, headers=headers, proxies=PROXIES, timeout=15)
+
         if res.status_code == 200:
-            data = res.json().get("data", {})
-            tournaments = data.get("tournaments", []) if isinstance(data, dict) else []
-            for tourney in tournaments:
-                for ev in tourney.get("events", []):
-                    home, away = ev.get("homeTeamName"), ev.get("awayTeamName")
-                    match_time = format_match_date(ev.get("estimateStartTime"))
-                    if not home or not away: continue
-                    odds = {}
-                    for mkt in ev.get("markets", []):
-                        if str(mkt.get("id")) in ["1", "sr:market:1"]:
-                            for out in mkt.get("outcomes", []):
-                                desc = str(out.get("desc", ""))
-                                if desc == "1": odds["Home"] = float(out.get("odds", 0))
-                                elif desc == "X": odds["Draw"] = float(out.get("odds", 0))
-                                elif desc == "2": odds["Away"] = float(out.get("odds", 0))
-                    if len(odds) == 3 and all(v > 1.0 for v in odds.values()):
-                        matches.append({
-                            "bookie": APPROVED_NAIJA_BOOKIES["sportybet"], "home": home, "away": away,
-                            "match_date": match_time,
-                            "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", "odds": odds
-                        })
+            res_data = res.json()
+            if res_data.get("bizCode") == 10000:
+                data = res_data.get("data", {})
+                tournaments = data.get("tournaments", []) if isinstance(data, dict) else []
+                
+                for tourney in tournaments:
+                    for ev in tourney.get("events", []):
+                        home = ev.get("homeTeamName")
+                        away = ev.get("awayTeamName")
+                        match_time = format_match_date(ev.get("estimateStartTime"))
+                        if not home or not away: 
+                            continue
+                            
+                        odds = {}
+                        for mkt in ev.get("markets", []):
+                            if str(mkt.get("id")) in ["1", "sr:market:1"]:
+                                for out in mkt.get("outcomes", []):
+                                    desc = str(out.get("desc", ""))
+                                    price = float(out.get("odds", 0))
+                                    if desc == "1": odds["Home"] = price
+                                    elif desc == "X": odds["Draw"] = price
+                                    elif desc == "2": odds["Away"] = price
+                                    
+                        if len(odds) == 3 and all(v > 1.0 for v in odds.values()):
+                            matches.append({
+                                "bookie": APPROVED_NAIJA_BOOKIES["sportybet"], 
+                                "home": home, 
+                                "away": away,
+                                "match_date": match_time,
+                                "norm_key": f"{normalize_team_name(home)}_{normalize_team_name(away)}", 
+                                "odds": odds
+                            })
         logging.info(f"[SportyBet] Fetched {len(matches)} matches.")
     except Exception as e:
         logging.warning(f"[SportyBet Error]: {e}")
@@ -151,7 +177,8 @@ def fetch_odds_api_filtered():
             for ev in res.json():
                 home, away = ev.get("home_team"), ev.get("away_team")
                 match_time = format_match_date(ev.get("commence_time"))
-                if not home or not away: continue
+                if not home or not away: 
+                    continue
                 
                 norm_key = f"{normalize_team_name(home)}_{normalize_team_name(away)}"
                 for bookie in ev.get("bookmakers", []):
@@ -182,6 +209,9 @@ def fetch_odds_api_filtered():
         logging.warning(f"[Odds API Exception]: {e}")
     return matches
 
+# ---------------------------------------------------------------------------
+# Core Arbitrage Logic & Telegram Dispatcher
+# ---------------------------------------------------------------------------
 def calculate_arbitrage():
     scrapers = [fetch_sportybet, fetch_odds_api_filtered]
     all_matches = []
@@ -280,9 +310,8 @@ def scan_loop():
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 # ---------------------------------------------------------------------------
-# Background Scanning & Web Server Startup
+# Engine Execution
 # ---------------------------------------------------------------------------
-# Start scanner thread in background
 threading.Thread(target=scan_loop, daemon=True).start()
 
 if __name__ == "__main__":
