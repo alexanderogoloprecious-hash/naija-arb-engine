@@ -1,6 +1,6 @@
 """
 Entry point. Polls all active bookmakers concurrently, matches fixtures,
-evaluates each for arbitrage, and alerts via Telegram â€” with a cooldown so
+evaluates each for arbitrage, and alerts via Telegram — with a cooldown so
 the same opportunity doesn't spam you every 30 seconds while it persists.
 
 Run:
@@ -16,7 +16,8 @@ import config
 from arbitrage import evaluate_fixture
 from fetchers.base import OddsQuote
 from fetchers.betking_fetcher import BetkingFetcher
-from fetchers.naijabet_fetchers import Bet9jaFetcher, NairabetFetcher
+from fetchers.naijabet_fetchers import NairabetFetcher
+from fetchers.bet9ja_cffi_fetcher import Bet9jaCffiFetcher
 from fixture_matcher import group_by_fixture
 from health_server import start_health_server
 from telegram_notifier import send_alert, send_status
@@ -28,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger("arb_alert")
 
 FETCHER_REGISTRY = {
-    "bet9ja": Bet9jaFetcher,
+    "bet9ja": Bet9jaCffiFetcher,
     "nairabet": NairabetFetcher,
     "betking": BetkingFetcher,
 }
@@ -39,7 +40,7 @@ def build_fetchers() -> list:
     for name in config.ACTIVE_BOOKMAKERS:
         cls = FETCHER_REGISTRY.get(name)
         if cls is None:
-            logger.warning("No fetcher registered for bookmaker '%s' â€” skipping", name)
+            logger.warning("No fetcher registered for bookmaker '%s' — skipping", name)
             continue
         try:
             fetchers.append(cls())
@@ -73,7 +74,7 @@ async def poll_cycle(fetchers, alert_history: dict) -> None:
 
         for group in groups:
             if len({q.bookmaker for q in group}) < 2:
-                continue  # only one bookmaker has this fixture â€” nothing to arb against
+                continue  # only one bookmaker has this fixture — nothing to arb against
 
             opp = evaluate_fixture(
                 group,
@@ -90,7 +91,7 @@ async def poll_cycle(fetchers, alert_history: dict) -> None:
                 continue
 
             logger.info(
-                "Arb found: %s vs %s â€” %.2f%%",
+                "Arb found: %s vs %s — %.2f%%",
                 opp.home_team, opp.away_team, opp.profit_percent,
             )
             sent = await send_alert(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID, opp)
@@ -101,21 +102,21 @@ async def poll_cycle(fetchers, alert_history: dict) -> None:
 async def main():
     # Start the health-check HTTP server in a background thread so Render
     # sees an open port and UptimeRobot has an endpoint to ping. This never
-    # touches odds data â€” it's purely a liveness signal.
+    # touches odds data — it's purely a liveness signal.
     threading.Thread(
         target=start_health_server, args=(config.PORT,), daemon=True
     ).start()
 
     fetchers = build_fetchers()
     if not fetchers:
-        logger.error("No bookmaker fetchers available â€” check config and installed deps.")
+        logger.error("No bookmaker fetchers available — check config and installed deps.")
         return
 
     logger.info("Starting arbitrage alert system with %d bookmaker(s): %s",
                 len(fetchers), [f.name for f in fetchers])
     await send_status(
         config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID,
-        f"âœ… Arb alert system started â€” watching {[f.name for f in fetchers]} "
+        f"✅ Arb alert system started — watching {[f.name for f in fetchers]} "
         f"across {len(config.TRACKED_LEAGUES)} leagues, poll every {config.POLL_INTERVAL_SECONDS}s.",
     )
 
