@@ -39,7 +39,7 @@ MAX_ODDS_AGE_SECONDS = 45
 REFERENCE_STAKE_NGN = 50_000
 
 # Leagues to track (extend as needed â€” must match what each fetcher exposes)
-TRACKED_LEAGUES = ["PREMIERLEAGUE", "LALIGA", "SERIEA", "BUNDESLIGA"]
+TRACKED_LEAGUES = ["PREMIERLEAGUE", "LALIGA", "SERIEA", "BUNDESLIGA", "LIGUE1"]
 
 # --- Dedup ---
 # Don't re-alert the same fixture+market within this window even if it keeps qualifying.
